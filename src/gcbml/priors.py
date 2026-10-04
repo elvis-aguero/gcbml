@@ -6,7 +6,6 @@ logistic map, and every log density returned here is the density of the UNCONSTR
 scales (S_mu, S_c, S_delta, S_noise) are required inputs; defaults exist only for quantities that
 are generic in unit coordinates (length scales) or dimensionless (orders).
 
-TODO(W1-A): implement.
 
 pc_matern_logpdf(log_sigma, log_ell, sigma0, ell0, alpha_sigma=0.05, alpha_ell=0.05)
     PC prior for the (sigma, ell) of a Matérn field with d = 1 (Fuglstad et al. 1503.00256, Thm 2.6),
@@ -27,6 +26,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+import jax.numpy as jnp
+from jax.nn import log_sigmoid
+
 
 @dataclass(frozen=True)
 class PriorScales:
@@ -43,16 +45,31 @@ class PriorScales:
 
 
 def pc_matern_logpdf(log_sigma, log_ell, sigma0, ell0, alpha_sigma=0.05, alpha_ell=0.05):
-    raise NotImplementedError("W1-A")
+    # Thm 2.6 of 1503.00256 with d = 1: pi(sigma, rho) = 0.5 l1 l2 rho^{-3/2} exp(-l1 rho^{-1/2} - l2 sigma),
+    # l1 = -log(alpha_ell) rho0^{1/2}, l2 = -log(alpha_sigma) / sigma0. The density factorises, so with
+    # u = log sigma, v = log ell and the Jacobians exp(u), exp(v):
+    #   sigma factor: log l2 + u - l2 e^u        (one per call)
+    #   ell factor:   log(0.5 l1) - v/2 - l1 e^{-v/2}   (one per length scale)
+    log_sigma = jnp.asarray(log_sigma, dtype=float)
+    log_ell = jnp.asarray(log_ell, dtype=float)
+    l1 = -math.log(alpha_ell) * jnp.sqrt(ell0)
+    l2 = -math.log(alpha_sigma) / sigma0
+    sigma_part = jnp.log(l2) + log_sigma - l2 * jnp.exp(log_sigma)
+    ell_part = jnp.log(0.5 * l1) - 0.5 * log_ell - l1 * jnp.exp(-0.5 * log_ell)
+    return jnp.sum(sigma_part) + jnp.sum(ell_part)
 
 
 def lognormal_logpdf(log_x, mu, sd):
-    raise NotImplementedError("W1-A")
+    return normal_logpdf(log_x, mu, sd)
 
 
 def normal_logpdf(x, mean, sd):
-    raise NotImplementedError("W1-A")
+    x = jnp.asarray(x, dtype=float)
+    z = (x - mean) / sd
+    return jnp.sum(-0.5 * z**2 - jnp.log(sd) - 0.5 * math.log(2.0 * math.pi))
 
 
 def logit_uniform_logpdf(logit_x):
-    raise NotImplementedError("W1-A")
+    # x = sigmoid(t) ~ U(0,1); dx/dt = x (1 - x) = sigmoid(t) sigmoid(-t).
+    t = jnp.asarray(logit_x, dtype=float)
+    return jnp.sum(log_sigmoid(t) + log_sigmoid(-t))
