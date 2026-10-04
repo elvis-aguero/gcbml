@@ -25,7 +25,7 @@ beta prior:
     A must have full column rank (spec 2.5). A^T K^{-1} A is a small (q, q) matrix: factor it with
     linalg.factor (mask of ones) as well. Never form an explicit inverse.
 
-TODO(W2-A): implement the functions below. All are pure jax (jit, and vmap over parameter draws), use
+Implemented in W2-A. All functions below are pure jax (jit, and vmap over parameter draws), use
 gcbml.linalg for every solve, and respect the padding mask: padded rows must not affect any result.
 
 mean_basis(X, kind) -> M (n, q)
@@ -55,9 +55,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
+from jax.scipy.special import ndtr, ndtri
 
-from gcbml.kernels import DeltaParams
+from gcbml import linalg
+from gcbml.kernels import DeltaParams, ard_matern, delta_cov, matern
 
 
 @dataclass(frozen=True)
@@ -87,29 +90,238 @@ class ModelParams(NamedTuple):
     ell_v: jnp.ndarray  # () within-run correlation length over v (ignored unless cfg.within_run)
 
 
+def _hpow(h, p):
+    """h**p with exactly 0 (and a finite gradient) at h = 0."""
+    pos = h > 0
+    return jnp.where(pos, jnp.where(pos, h, 1.0) ** p, 0.0)
+
+
 def mean_basis(X, kind: str):
-    raise NotImplementedError("W2-A")
+    """Mean basis M (n, q): "constant" -> [1]; "linear" -> [1, x_1, ..., x_d]."""
+    X = jnp.asarray(X, dtype=float)
+    ones = jnp.ones((X.shape[0], 1))
+    if kind == "constant":
+        return ones
+    if kind == "linear":
+        return jnp.concatenate([ones, X], axis=1)
+    raise ValueError(f"mean_basis must be 'constant' or 'linear', got {kind!r}")
 
 
 def rho(params: ModelParams, H, P):
-    raise NotImplementedError("W2-A")
+    """(rho0, rho1) of rows with scaled resolutions H (n, k) and orders P (n, k); hbar^p := 0 at hbar = 0."""
+    hp = _hpow(jnp.asarray(H, dtype=float), P)
+    return hp @ params.c0, 1.0 + hp @ params.c1
+
+
+def _noise_cov(params: ModelParams, data, cfg: ModelConfig):
+    """S = D R D, with R = I unless cfg.within_run (Matern 3/2 in |v_i - v_l| / ell_v inside a run)."""
+    nv = params.noise_var
+    if not cfg.within_run:
+        return jnp.diag(nv)
+    if not cfg.v_index:
+        raise ValueError("within_run=True needs cfg.v_index (the columns of X that are output coordinates)")
+    V = jnp.asarray(data.X, dtype=float)[:, jnp.asarray(cfg.v_index)]
+    r2 = jnp.maximum(jnp.sum((V[:, None, :] - V[None, :, :]) ** 2, axis=-1), 0.0)
+    R = matern(jnp.sqrt(r2) / params.ell_v, 1.5)
+    run = jnp.asarray(data.run)
+    same = run[:, None] == run[None, :]
+    sd = jnp.sqrt(nv)
+    off = jnp.where(same, sd[:, None] * sd[None, :] * R, 0.0)
+    eye = jnp.eye(nv.shape[0], dtype=bool)
+    return jnp.where(eye, jnp.diag(nv), off)  # exact diagonal (also when nv < 0, which factor() rejects)
+
+
+class _Setup(NamedTuple):
+    mask: jnp.ndarray
+    rho0: jnp.ndarray  # (n,) zero on padded rows
+    rho1: jnp.ndarray  # (n,) zero on padded rows
+    A: jnp.ndarray  # (n, q) diag(rho1) M, zero on padded rows
+    K: jnp.ndarray  # (n, n) covariance without the beta term, zero outside the real block
+
+
+def _setup(params: ModelParams, data, cfg: ModelConfig) -> _Setup:
+    mask = jnp.asarray(data.mask, dtype=bool)
+    X = jnp.asarray(data.X, dtype=float)
+    H = jnp.asarray(data.H, dtype=float)
+    rho0, rho1 = rho(params, H, params.P)
+    rho0, rho1 = jnp.where(mask, rho0, 0.0), jnp.where(mask, rho1, 0.0)
+    A = jnp.where(mask[:, None], rho1[:, None] * mean_basis(X, cfg.mean_basis), 0.0)
+    Kg = params.sigma_mu**2 * ard_matern(X, X, params.ell_mu, cfg.nu_x)
+    Kd = delta_cov(X, H, X, H, params.P, params.P, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    K = rho1[:, None] * Kg * rho1[None, :] + Kd + _noise_cov(params, data, cfg)
+    K = jnp.where(mask[:, None] & mask[None, :], K, 0.0)
+    return _Setup(mask, rho0, rho1, A, K)
 
 
 def covariance(params: ModelParams, data, cfg: ModelConfig):
-    raise NotImplementedError("W2-A")
+    """K = diag(rho1) K_g diag(rho1) + K_delta + S on the real block; padded rows and columns are zero.
+
+    (linalg.factor adds the identity on the padded block.)
+    """
+    return _setup(params, data, cfg).K
+
+
+def _beta_prior(cfg: ModelConfig):
+    b0, bsd = cfg.beta_prior
+    return jnp.asarray(b0, dtype=float), jnp.asarray(bsd, dtype=float)
+
+
+def _flat_pieces(S: _Setup):
+    """Factor of K, K^{-1} A and the factor of the small matrix G = A^T K^{-1} A (flat beta)."""
+    F = linalg.factor(S.K, S.mask)
+    KiA = linalg.solve(F, S.A)
+    G = S.A.T @ KiA
+    Fg = linalg.factor(0.5 * (G + G.T), jnp.ones(G.shape[0], dtype=bool))
+    return F, KiA, Fg
 
 
 def log_marginal(params: ModelParams, data, z, cfg: ModelConfig):
-    raise NotImplementedError("W2-A")
+    """log p(z | params) with mu, delta and beta integrated out; -inf if the covariance cannot be factored.
+
+    Gaussian beta: log N(z; rho0 + A b0, K + A diag(bsd^2) A^T). Flat beta: the restricted likelihood of the
+    module docstring. With q coefficients all of prior sd bsd, flat = Gaussian + q log(bsd) + (q/2) log(2 pi)
+    in the limit bsd -> infinity (log|K + A B A^T| = log|B| + log|B^{-1} + A^T K^{-1} A|, and the Gaussian
+    carries n/2 log 2 pi against (n - q)/2 log 2 pi); the gap shrinks like 1/bsd^2 (tests/test_model.py).
+    """
+    S = _setup(params, data, cfg)
+    z = jnp.asarray(z, dtype=float)
+    n = jnp.sum(S.mask)
+    if cfg.beta_prior is None:
+        r = jnp.where(S.mask, z - S.rho0, 0.0)
+        F, KiA, Fg = _flat_pieces(S)
+        Kir = linalg.solve(F, r)
+        Atr = S.A.T @ Kir
+        q = S.A.shape[1]
+        val = (
+            -0.5 * (r @ Kir - linalg.quad(Fg, Atr))
+            - 0.5 * linalg.logdet(F)
+            - 0.5 * linalg.logdet(Fg)
+            - 0.5 * (n - q) * jnp.log(2.0 * jnp.pi)
+        )
+    else:
+        b0, bsd = _beta_prior(cfg)
+        Kt = S.K + (S.A * bsd**2) @ S.A.T
+        r = jnp.where(S.mask, z - S.rho0 - S.A @ b0, 0.0)
+        val = linalg.gaussian_logpdf(linalg.factor(Kt, S.mask), r, S.mask)
+    return jnp.where(jnp.isfinite(val), val, -jnp.inf)
+
+
+def _posterior(params, data, z, cfg, S: _Setup, As, C, v, offset):
+    """Posterior of f_* = offset + As beta + u_*, with u_* the non-beta part (cov C with z, variance v).
+
+    C (n, s) must be zero on padded rows. Flat beta: universal kriging (generalised least squares beta_hat
+    plus the variance of estimating it). Gaussian beta: the joint Gaussian conditional.
+    """
+    z = jnp.asarray(z, dtype=float)
+    if cfg.beta_prior is None:
+        r = jnp.where(S.mask, z - S.rho0, 0.0)
+        F, KiA, Fg = _flat_pieces(S)
+        Kir = linalg.solve(F, r)
+        bhat = linalg.solve(Fg, S.A.T @ Kir)
+        KiC = linalg.solve(F, C)
+        mean = offset + As @ bhat + C.T @ (Kir - KiA @ bhat)
+        Rm = As.T - S.A.T @ KiC
+        var = v - jnp.sum(C * KiC, axis=0) + jnp.sum(Rm * linalg.solve(Fg, Rm), axis=0)
+    else:
+        b0, bsd = _beta_prior(cfg)
+        Kt = S.K + (S.A * bsd**2) @ S.A.T
+        Ct = C + S.A @ ((bsd**2)[:, None] * As.T)
+        vt = v + jnp.sum(As * bsd**2 * As, axis=1)
+        r = jnp.where(S.mask, z - S.rho0 - S.A @ b0, 0.0)
+        mean, var = linalg.conditional(linalg.factor(Kt, S.mask), Ct, vt, r)
+        mean = mean + offset + As @ b0
+    return mean, jnp.maximum(var, 0.0)
 
 
 def predict_mu(params: ModelParams, data, z, cfg: ModelConfig, Xs):
-    raise NotImplementedError("W2-A")
+    """Posterior mean and variance of mu(x*) = m(x*)^T beta + g(x*) at unit points Xs (s, d)."""
+    S = _setup(params, data, cfg)
+    X = jnp.asarray(data.X, dtype=float)
+    Xs = jnp.asarray(Xs, dtype=float)
+    Ms = mean_basis(Xs, cfg.mean_basis)
+    Kxs = params.sigma_mu**2 * ard_matern(X, Xs, params.ell_mu, cfg.nu_x)
+    C = jnp.where(S.mask[:, None], S.rho1[:, None] * Kxs, 0.0)
+    v = jnp.full(Xs.shape[0], params.sigma_mu**2)
+    return _posterior(params, data, z, cfg, S, Ms, C, v, jnp.zeros(Xs.shape[0]))
 
 
 def predict_level(params: ModelParams, data, z, cfg: ModelConfig, Xs, Hs, Ps, noise_var_s=None):
-    raise NotImplementedError("W2-A")
+    """Posterior of the noise-free level f(x*, h*) = rho0* + rho1* mu(x*) + delta(x*, h*); see module docs."""
+    S = _setup(params, data, cfg)
+    X = jnp.asarray(data.X, dtype=float)
+    H = jnp.asarray(data.H, dtype=float)
+    Xs, Hs, Ps = (jnp.asarray(a, dtype=float) for a in (Xs, Hs, Ps))
+    rho0s, rho1s = rho(params, Hs, Ps)
+    Ms = mean_basis(Xs, cfg.mean_basis)
+    Kxs = params.sigma_mu**2 * ard_matern(X, Xs, params.ell_mu, cfg.nu_x)
+    Kds = delta_cov(X, H, Xs, Hs, params.P, Ps, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    C = jnp.where(S.mask[:, None], S.rho1[:, None] * Kxs * rho1s[None, :] + Kds, 0.0)
+    Kss = delta_cov(Xs, Hs, Xs, Hs, Ps, Ps, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    v = rho1s**2 * params.sigma_mu**2 + jnp.diag(Kss)
+    mean, var = _posterior(params, data, z, cfg, S, rho1s[:, None] * Ms, C, v, rho0s)
+    if noise_var_s is not None:
+        var = var + jnp.asarray(noise_var_s, dtype=float)
+    return mean, var
+
+
+def _lower_truncated_normal(key, a):
+    """Standard normal draw conditioned on x >= a, by inverse-CDF on the stable tail (a is a scalar)."""
+    u = jax.random.uniform(key, (), minval=jnp.finfo(float).tiny, maxval=1.0)
+    # a <= 0: x = Phi^{-1}(Phi(a) + u (1 - Phi(a))); a > 0: x = -Phi^{-1}(u Phi(-a)) (no cancellation)
+    lo = ndtri(ndtr(a) + u * ndtr(-a))
+    mid = -ndtri(u * ndtr(-a))
+    # beyond a = 30, Phi(-a) is ~1e-197 and the tail is Rayleigh to relative O(1/a^2): x = sqrt(a^2 - 2 log u)
+    tail = jnp.sqrt(a * a - 2.0 * jnp.log(u))
+    x = jnp.where(a > 30.0, tail, jnp.where(a > 0.0, mid, lo))
+    return jnp.maximum(x, a)
 
 
 def censored_sweep(key, params: ModelParams, data, z, cfg: ModelConfig, bounds):
-    raise NotImplementedError("W2-A")
+    """One Gibbs sweep over the censored rows, in index order; see the module docstring.
+
+    The full conditional of row i uses the (beta-integrated) precision Q only through its column i, which
+    is obtained by triangular solves (flat beta: Q = K^{-1} - K^{-1}A G^{-1} A^T K^{-1}, so
+    Q e_i = K^{-1} e_i - (K^{-1}A) G^{-1} (K^{-1}A)_i^T). Q r is kept current after each draw.
+    """
+    S = _setup(params, data, cfg)
+    z = jnp.asarray(z, dtype=float)
+    bounds = jnp.asarray(bounds, dtype=float)
+    n = z.shape[0]
+    if cfg.beta_prior is None:
+        F, KiA, Fg = _flat_pieces(S)
+        r = jnp.where(S.mask, z - S.rho0, 0.0)
+        Qr = linalg.solve(F, r) - KiA @ linalg.solve(Fg, KiA.T @ r)
+
+        def qcol(i):
+            u = linalg.solve(F, jnp.zeros(n).at[i].set(1.0))
+            return u - KiA @ linalg.solve(Fg, KiA[i])
+    else:
+        b0, bsd = _beta_prior(cfg)
+        F = linalg.factor(S.K + (S.A * bsd**2) @ S.A.T, S.mask)
+        r = jnp.where(S.mask, z - S.rho0 - S.A @ b0, 0.0)
+        Qr = linalg.solve(F, r)
+
+        def qcol(i):
+            return linalg.solve(F, jnp.zeros(n).at[i].set(1.0))
+
+    sgn = 1.0 if cfg.increasing else -1.0
+    do = jnp.asarray(data.censored, dtype=bool) & S.mask
+
+    def step(carry, inp):
+        z, Qr = carry
+        i, k, flag = inp
+
+        def draw(_):
+            col = qcol(i)
+            qii = col[i]
+            sd = 1.0 / jnp.sqrt(qii)
+            m = z[i] - Qr[i] / qii
+            a = sgn * (bounds[i] - m) / sd  # allowed region is sgn * (x - bound) >= 0
+            x = _lower_truncated_normal(k, a)
+            zi = m + sgn * sd * x
+            return z.at[i].set(zi), Qr + col * (zi - z[i])
+
+        return jax.lax.cond(flag, draw, lambda _: (z, Qr), None), None
+
+    (z_new, _), _ = jax.lax.scan(step, (z, Qr), (jnp.arange(n), jax.random.split(key, n), do))
+    return z_new
