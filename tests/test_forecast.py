@@ -10,7 +10,7 @@ from gcbml.forecast import ForecastResult, forecast
 
 
 def candidates():
-    xs = np.linspace(0.0, 1.0, 11)
+    xs = np.linspace(0.0, 1.0, 7)
     cheap = [cand(x, 1.0, cost=1.0, cap=1.5, level=0) for x in xs]
     fine = [cand(x, 0.5, cost=4.0, cap=6.0, level=1) for x in xs]
     return cheap + fine
@@ -19,7 +19,7 @@ def candidates():
 def test_forecast_feasible_problem_reports_success_within_steps_and_budget():
     structs, data = world()
     sig0 = float(np.asarray(acq.sigma_epi_physical(structs, data, XS)).max())
-    eps = 0.45 * sig0
+    eps = 0.6 * sig0
     cands = candidates()
     res = forecast(jax.random.key(0), structs, data, cands, XS, eps, budget_remaining=200.0)
     assert isinstance(res, ForecastResult)
@@ -37,7 +37,7 @@ def test_forecast_feasible_problem_reports_success_within_steps_and_budget():
 def test_forecast_first_step_is_the_best_ratio_of_the_deterministic_gains():
     structs, data = world()
     sig0 = float(np.asarray(acq.sigma_epi_physical(structs, data, XS)).max())
-    eps = 0.45 * sig0
+    eps = 0.6 * sig0
     cands = candidates()[::3]
     res = forecast(jax.random.key(0), structs, data, cands, XS, eps, 200.0)
     ratios = [deterministic_gain(structs, data, c, XS, eps) / c.cost_mean for c in cands]

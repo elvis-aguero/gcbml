@@ -438,3 +438,90 @@ def test_select_batch_subsamples_draws_by_weight_deterministically():
     r2 = acq.select_batch(jax.random.key(0), structs, data, cands, XS, eps, 1, 100.0, max_draws=3)
     assert r1[0] == r2[0]
     np.testing.assert_allclose(r1[1].gain, r2[1].gain, rtol=1e-12)
+
+
+# ----------------------------------------------------------------------------------------------
+# End to end (slow): five greedy steps against an oracle that draws from the true model
+# ----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_five_greedy_steps_shrink_the_worst_sigma_epi_over_eps():
+    n_pad = 24
+    true_p = make_params(n_pad, p=1.4, c0=0.5, c1=0.2, dsig=0.15, nv=1e-3)
+    # the truth plus two plausible neighbours, one structure each, so the weights can move (equal at start)
+    plist = [true_p, make_params(n_pad, p=0.9, c0=0.5, c1=0.2), make_params(n_pad, p=2.0, c0=0.5, c1=0.2)]
+    xs = np.linspace(0.05, 0.95, 6)
+    X = np.concatenate([xs[:, None], xs[::2, None]])
+    H = np.concatenate([np.full((6, 1), 1.0), np.full((3, 1), 0.5)])
+    data = make_data(X, H, n_pad)
+    z0 = simulate_z(7, true_p, data, CFG)
+    tf = transforms.get("identity")
+    zs = [z0, z0, z0]
+    params = list(plist)
+    w = np.full(3, 1.0 / 3.0)
+    cands = [
+        cand(x, h, cost=c)
+        for x in np.linspace(0.0, 1.0, 9)
+        for h, c in ((1.0, 1.0), (0.5, 4.0), (0.25, 16.0))
+    ]
+    rng = np.random.default_rng(5)
+
+    def structures():
+        return tuple(
+            StructurePosterior(params=stack([p]), z=jnp.stack([z]), cfg=CFG, transform=tf, weight=float(wk))
+            for p, z, wk in zip(params, zs, w, strict=True)
+        )
+
+    sig = np.asarray(acq.sigma_epi_physical(structures(), data, XS))
+    eps = 0.3 * float(sig.max())
+    worst = [float((sig / eps).max())]
+    for step in range(5):
+        chosen, table = acq.select_batch(
+            jax.random.key(step), structures(), data, cands, XS, eps, 1, budget_remaining=1e6
+        )
+        assert len(chosen) == 1
+        c = cands[chosen[0]]
+        Hn = np.asarray(c.hbar)[None, :]
+        # oracle: draw the outputs from the true model given everything so far
+        Pn = np.asarray(params[0].P[:1])
+        jn = model.joint_new(
+            params[0],
+            data,
+            zs[0],
+            CFG,
+            jnp.asarray(c.Xa),
+            jnp.asarray(Hn),
+            jnp.asarray(Pn),
+            True,
+            c.noise_var,
+        )
+        ya = np.asarray(jn.mean) + np.linalg.cholesky(np.asarray(jn.cov)) @ rng.standard_normal(len(c.Xa))
+        # update every draw: weights by the predictive density of the new output, then extend the data
+        logp = []
+        for k in range(3):
+            jk = model.joint_new(
+                params[k],
+                data,
+                zs[k],
+                CFG,
+                jnp.asarray(c.Xa),
+                jnp.asarray(Hn),
+                jnp.asarray(Pn),
+                True,
+                c.noise_var,
+            )
+            logp.append(stats.multivariate_normal(np.asarray(jk.mean), np.asarray(jk.cov)).logpdf(ya))
+        w = w * np.exp(np.array(logp) - max(logp))
+        w = w / w.sum()
+        new = [
+            extend(params[k], data, zs[k], c.Xa, Hn, Pn, c.noise_var, ya, run_id=100 + step) for k in range(3)
+        ]
+        params = [a[0] for a in new]
+        zs = [a[2] for a in new]
+        data = new[0][1]
+        sig = np.asarray(acq.sigma_epi_physical(structures(), data, XS))
+        worst.append(float((sig / eps).max()))
+    print("max sigma_epi / eps per step:", np.round(worst, 3), "weights", np.round(w, 3))
+    assert worst[-1] < worst[0]
+    assert worst[1] < worst[0]

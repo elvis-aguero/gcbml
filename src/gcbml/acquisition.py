@@ -50,6 +50,43 @@ expected_gain(key, structures, data, cand, Xs, eps, n_fantasy, mode) -> (gain, m
 select_batch(key, structures, data, candidates, Xs, eps, q, budget_remaining, pending=(), mode="hinge",
              max_draws=64) -> (chosen indices, table of (gain, cost_mean, ratio, admissible) per candidate)
     max_draws: subsample this many pooled draws (by weight, systematic resampling) for speed; document it.
+
+How it is computed (W4-B) and where it differs from the stubs:
+  * One joint Gaussian per draw. For every draw, the posterior (given the data, beta integrated) of
+    u = [mu(Xs); the outputs of every candidate and pending run] is built once (model._new_blocks and
+    model._posterior_joint; the blocks are those of model.joint_new). Everything afterwards is small linear
+    algebra on (U, U) arrays, vmapped over draws: no step refactors the n x n data matrix. Observing a
+    candidate's rows is the Gaussian conditioning of u: covariance minus G C^{-1} G^T, mean plus
+    G C^{-1} (ya - mean). This equals extending the draw's factor with linalg.append and reading predict_mu
+    on the enlarged data (tests/test_acquisition.py checks it, for flat and Gaussian beta).
+  * Draws: all (expected_gain, sigma_epi_physical) or max_draws of them (select_batch), thinned by
+    systematic resampling at the fixed offset 1/2, so the call is deterministic. A structure that receives
+    no draw drops out of that call.
+  * sigma_epi of the pool: all structures with one Lambda: Newton/bisection on the mixture CDF in Lambda
+    units, then Lambda^{-1} (spec 2.8). Structures with different Lambda: bisection on the physical-scale
+    mixture CDF. A Gaussian on the Lambda scale that puts mass outside the domain of Lambda^{-1} (reciprocal
+    with mu near 0) has no finite sigma_epi; such draws give inf/NaN and are not guarded.
+  * The 16/84 half-width of a Gaussian is 0.9945 sd, not sd: sigma_epi of one Gaussian draw with the
+    identity is 0.9945 times its predictive sd (the stub text equates them).
+  * Fantasies: the draw and the output come from the pooled weights; reweighting is within each structure
+    (structure weights fixed, as the spec says); a fantasy drawn in the units of one structure is mapped to
+    the others through Lambda^{-1} (Jacobians cancel within a structure). ESS is that of the pooled weights;
+    if ESS < ess_min the weights are kept (ess_min: keyword added to expected_gain and select_batch, default
+    50 as in the spec). NOTE: with max_draws = 64 and ess_min = 50, the ESS rule keeps the weights whenever
+    reweighting would cut the effective draws by more than 22%, so reweighting is mostly disabled; a relative
+    threshold (e.g. 0.25 D) may serve better. Reviewer's decision.
+  * Fantasies per candidate: 16 for every admissible one, then doubled for the best two only, until the s.e.
+    of the best ratio is below 10% of its gap to the second best or 256 is reached (spec: "doubled until").
+  * Variance-only property: with one draw and the identity, sigma_epi does not depend on the fantasy value, so
+    the expected gain equals the deterministic gain exactly (tests). With a log or reciprocal transform, or
+    several draws, the value moves the means and the property does not hold.
+  * Added to the stubs: expected_gain_detail, GainDetail, GainTable (select_batch returns the table of the
+    first greedy step as a GainTable of arrays, indexed by field name), ess_min, n_fantasy_start/max.
+    Each candidate can be chosen once per batch (list replicates as separate candidates). A batch ends early
+    when no admissible candidate has a positive gain.
+  * Candidate.noise_var: (m,), or (S_k, m) with S_k the number of draws of EACH structure (per-draw noise).
+    New rows take the order P[0] of each draw, hbar = Candidate.hbar for all m rows, and form a run of their
+    own (their noise is independent of the data's). Candidate.levels is not used here.
 """
 
 from __future__ import annotations
