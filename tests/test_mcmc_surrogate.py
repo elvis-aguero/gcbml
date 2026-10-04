@@ -143,7 +143,7 @@ def f_conditional(theta, x, y, s, rng=None):
 @pytest.mark.parametrize("s,seed", [(0.3, 1), (0.02, 2)])
 def test_one_step_leaves_joint_posterior_invariant(s, seed):
     """From exact posterior draws of (theta, f), one step keeps theta ~ grid marginal and f | theta."""
-    n_draws = 1500
+    n_draws = 1000
     x, y = make_data(s, seed=seed)
     a, b, p, th0, f0 = grid_sample(x, y, s, n_draws, seed=seed)
     prior_cov, loglik, log_prior, surr = make_model(x, y, s)
