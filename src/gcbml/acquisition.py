@@ -55,6 +55,8 @@ select_batch(key, structures, data, candidates, Xs, eps, q, budget_remaining, pe
 from __future__ import annotations
 
 import functools
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, NamedTuple
 
 import jax
@@ -68,6 +70,7 @@ from gcbml.data import PaddedData
 from gcbml.kernels import ard_matern
 
 _P_LO, _P_HI = 0.16, 0.84
+_PS = np.array([_P_LO, _P_HI])
 _Z84 = float(_ndtri(_P_HI))  # the 16/84 quantile half-width of a Gaussian is _Z84 * sd (0.9945 sd)
 _BISECT = 48  # bracket width * 2^-48 ~ 4e-15 of the bracket
 
@@ -120,19 +123,41 @@ def _same_units(segs) -> bool:
 
 
 def _z_quantiles(ps, m, sd, W):
-    """Quantiles ps (2,) of the mixture sum_d W_d N(m_d, sd_d^2) per column; m, sd (D, s) -> (2, s)."""
-    lo = jnp.broadcast_to(jnp.min(m - 8.0 * sd, axis=0), (2, m.shape[1]))
-    hi = jnp.broadcast_to(jnp.max(m + 8.0 * sd, axis=0), (2, m.shape[1]))
+    """Quantiles ps (2,) of the mixture sum_d W_d N(m_d, sd_d^2) per column; m, sd (D, s) -> (2, s).
 
-    def body(_, st):
-        lo, hi = st
-        mid = 0.5 * (lo + hi)
-        c = jnp.sum(W[:, None, None] * ndtr((mid[None] - m[:, None, :]) / sd[:, None, :]), axis=0)
-        below = c < ps[:, None]
-        return jnp.where(below, mid, lo), jnp.where(below, hi, mid)
+    The p-quantile of a mixture lies between the smallest and the largest of the components' p-quantiles
+    (the mixture CDF is the weighted mean of the component CDFs): that is the bracket. Safeguarded Newton
+    on the mixture CDF from the weighted mean of the component quantiles, bisection when a Newton step
+    leaves the bracket; it stops when the step is below 1e-13 of the bracket scale (a few iterations).
+    """
+    zp = jax.scipy.special.ndtri(ps)
+    qd = m[:, None, :] + sd[:, None, :] * zp[None, :, None]  # (D, 2, s) component quantiles
+    lo, hi = jnp.min(qd, axis=0), jnp.max(qd, axis=0)
+    x0 = jnp.sum(W[:, None, None] * qd, axis=0)
+    scale = 1e-13 * (jnp.abs(lo) + jnp.abs(hi) + (hi - lo))
 
-    lo, hi = jax.lax.fori_loop(0, _BISECT, body, (lo, hi))
-    return 0.5 * (lo + hi)
+    def step(st):
+        it, x, lo, hi, _ = st
+        u = (x[None] - m[:, None, :]) / sd[:, None, :]
+        F = jnp.sum(W[:, None, None] * ndtr(u), axis=0)
+        f = jnp.sum(W[:, None, None] * jnp.exp(-0.5 * u * u) / sd[:, None, :], axis=0) / jnp.sqrt(
+            2.0 * jnp.pi
+        )
+        lo = jnp.where(F < ps[:, None], x, lo)
+        hi = jnp.where(F < ps[:, None], hi, x)
+        newton = (F - ps[:, None]) / jnp.maximum(f, 1e-300)
+        done = jnp.abs(newton) <= scale  # the Newton step is below the tolerance: x is the root
+        xn = x - newton
+        xn = jnp.where((xn > lo) & (xn < hi), xn, 0.5 * (lo + hi))
+        xn = jnp.where(done, x, xn)
+        return it + 1, xn, lo, hi, jnp.where(done, 0.0, jnp.abs(xn - x))
+
+    def cont(st):
+        it, _, _, _, dx = st
+        return (it < 100) & jnp.any(dx > 0.0)
+
+    init = (0, x0, lo, hi, jnp.full_like(x0, jnp.inf))
+    return jax.lax.while_loop(cont, step, init)[1]
 
 
 def _y_quantiles(ps, m, sd, W, segs):
@@ -524,24 +549,39 @@ def _predict_struct(params, z, dX, dH, drun, dmask, Xs, cfg):
     return jax.vmap(one)(params, z)
 
 
+def _n_threads() -> int:
+    return max(1, min(len(os.sched_getaffinity(0)), 8))
+
+
 def _evaluate(key, pool, blocks, costs, eps, mode, ess_min, n0, nmax):
     """Gains of the candidate blocks: n0 fantasies each, then doubling for the two best until the MC s.e. of
     the best ratio is below 10% of its gap to the second best, or nmax fantasies are reached."""
     samples = {}
     counter = [0]
 
-    def add(i, n):
-        k = jax.random.fold_in(key, counter[0])
-        counter[0] += 1
-        g, f = _gain_samples(k, pool, blocks[i], eps, n, mode, ess_min)
-        old = samples.get(i, ([], []))
-        samples[i] = (old[0] + [np.asarray(g)], old[1] + [np.asarray(f)])
+    def add_many(jobs):
+        """Run (candidate, n fantasies) jobs; keys are assigned in order, so the result does not depend on
+        the threads (XLA releases the GIL: elementwise CPU kernels are single-threaded, so threads give
+        up to one core per candidate)."""
+        keyed = []
+        for i, n in jobs:
+            keyed.append((i, n, jax.random.fold_in(key, counter[0])))
+            counter[0] += 1
+
+        def run(job):
+            i, n, k = job
+            g, f = _gain_samples(k, pool, blocks[i], eps, n, mode, ess_min)
+            return i, np.asarray(g), np.asarray(f)
+
+        with ThreadPoolExecutor(max_workers=_n_threads()) as ex:
+            for i, g, f in ex.map(run, keyed):
+                old = samples.get(i, ([], []))
+                samples[i] = (old[0] + [g], old[1] + [f])
 
     def detail(i):
         return _summarise(np.concatenate(samples[i][0]), np.concatenate(samples[i][1]))
 
-    for i in blocks:
-        add(i, n0)
+    add_many([(i, n0) for i in blocks])
     for _ in range(64):
         if len(blocks) < 2:
             break
@@ -551,10 +591,7 @@ def _evaluate(key, pool, blocks, costs, eps, mode, ess_min, n0, nmax):
         gap = det[b].gain / costs[b] - det[c].gain / costs[c]
         if det[b].mc_se / costs[b] <= 0.1 * gap or det[b].n_fantasy >= nmax:
             break
-        for i in (b, c):
-            n = min(det[i].n_fantasy, nmax - det[i].n_fantasy)
-            if n > 0:
-                add(i, n)
+        add_many([(i, min(det[i].n_fantasy, nmax - det[i].n_fantasy)) for i in (b, c)])
     return {i: detail(i) for i in blocks}
 
 
