@@ -10,6 +10,7 @@ run. Data arrays are therefore padded to a bucket size (``bucket(n)``) with mask
 from __future__ import annotations
 
 import math
+import os
 
 import jax
 
@@ -26,3 +27,21 @@ def bucket(n: int) -> int:
     k = math.ceil(math.log(n / BUCKET_MIN) / math.log(BUCKET_GROWTH))
     size = BUCKET_MIN * BUCKET_GROWTH**k
     return int(8 * math.ceil(size / 8))
+
+
+def _host_devices() -> None:
+    """Opt in to several CPU devices with GCBML_HOST_DEVICES=n (default: JAX's single CPU device).
+
+    mcmc.chains then runs one block of chains per device, each with its own control flow. It has to
+    happen before JAX starts its backend, so it is done at import. Measured on a loaded shared node the
+    gain was inconsistent (see the W3-A2 report), so it is off by default.
+    """
+    try:
+        n = int(os.environ.get("GCBML_HOST_DEVICES", "1"))
+        if n > 1:
+            jax.config.update("jax_num_cpu_devices", n)
+    except Exception:  # backend already initialised: keep what JAX has
+        pass
+
+
+_host_devices()

@@ -35,7 +35,7 @@ The sampler state is a dict {theta, hz, zeta, z[, pi, hpi]}; hz = (log sigma_z, 
 
 Starting rule [assumption]: per chain, 16 candidate states are drawn from the prior (theta, hz, zeta, pi),
 the first one with a finite log density is kept (not the best one: the starts stay over-dispersed), and
-then N_INIT_SWEEPS = 200 slice sweeps update theta only (zeta, pi and z fixed, widths 1).
+then N_INIT_SWEEPS = 30 slice sweeps update theta only (zeta, pi and z fixed, widths 1).
 
 Further assumptions: (a) surrogate noise for zeta (Murray & Adams Section 3.2): site i with n_i rows has
 the Fisher variance 2 / n_i of log s^2 and S_ii = 1 / max(n_i / 2 - 1 / sigma_z^2, 0.25 / sigma_z^2)
@@ -73,7 +73,7 @@ from gcbml import linalg, noise
 from gcbml.data import PaddedData
 from gcbml.kernels import DeltaParams, ard_matern
 from gcbml.mcmc import diagnostics as dg
-from gcbml.mcmc.chains import run_chains
+from gcbml.mcmc.chains import map_chains, run_chains
 from gcbml.mcmc.elliptical import ess_step
 from gcbml.mcmc.slice import slice_step
 from gcbml.mcmc.surrogate import surrogate_slice_step
@@ -86,7 +86,7 @@ from gcbml.priors import (
     pc_matern_logpdf,
 )
 
-N_INIT_SWEEPS = 200  # theta-only slice sweeps of the starting rule
+N_INIT_SWEEPS = 30  # theta-only slice sweeps of the starting rule (200 in the first version: 7x the cost)
 N_CANDIDATES = 16  # prior draws tried per chain for a finite starting density
 PI_SIGMA0, PI_ELL0 = 0.3, 0.1  # P(sigma_pi > 0.3) = 0.05, P(ell_pi < 0.1) = 0.05 (spec 2.5)
 PI_SURROGATE_VAR = 0.25  # surrogate-data noise variance of pi_j (assumption b)
@@ -388,6 +388,28 @@ class _Sampler:
             w["pi"] = jnp.ones((self.k, self.n_xs))
         return w
 
+    def _whitened_hz_move(self, key, hz, zeta, width, loglik):
+        """Slice sweep over hz = (log sigma_z, log ell_z) with eps = L(hz)^{-1} zeta fixed (zeta = L eps).
+
+        Target in (hz, eps): p(hz) N(eps; 0, I) p(data | L(hz) eps); the eps prior does not depend on hz, so
+        each coordinate is a plain slice update on log p(hz) + loglik(L(hz) eps). Complements the surrogate
+        move: it is efficient when the data constrain zeta weakly (few replicates), where the centred and the
+        surrogate parametrisations mix slowly.
+        """
+        L0 = jnp.linalg.cholesky(self.zeta_cov(hz))
+        eps = jax.scipy.linalg.solve_triangular(L0, zeta, lower=True)
+        ok0 = jnp.all(jnp.isfinite(eps))
+
+        def logdens(h):
+            L = jnp.linalg.cholesky(self.zeta_cov(h))
+            lp = self.log_prior_hz(h) + loglik(L @ eps)
+            return jnp.where(jnp.isfinite(lp), lp, -jnp.inf)
+
+        h_new, n = slice_step(key, hz, logdens, width)
+        h_new = jnp.where(ok0, h_new, hz)
+        L1 = jnp.linalg.cholesky(self.zeta_cov(h_new))
+        return h_new, jnp.where(ok0, L1 @ eps, zeta), n
+
     # --- one Gibbs iteration ---------------------------------------------------------------
 
     def _theta_logdensity(self, vec, hz, zeta, pi, z):
@@ -422,7 +444,11 @@ class _Sampler:
                 self.zeta_surrogate_var,
                 widths["hz"],
             )
-            n_evals = n1 + n2 + n3
+            # 3b. non-centred move: (log sigma_z, log ell_z) at fixed eps = L(hz)^{-1} zeta
+            hz, zeta, n3b = self._whitened_hz_move(
+                ks[5], hz, zeta, widths["hz"], lambda f: self.loglik(t, f, pi, z)
+            )
+            n_evals = n1 + n2 + n3 + n3b
             out = {"theta": theta, "hz": hz, "zeta": zeta}
             # 4. varying order
             if self.varying:
@@ -475,10 +501,10 @@ def _runner(template: _Sampler, n_warmup: int, n_samples: int, n_chains: int):
     def run(aux, key):
         smp = template.with_aux(aux)
         k_init, k_run = jax.random.split(key)
-        init, n_init = jax.vmap(smp.init_state)(jax.random.split(k_init, n_chains))
-        finite = jax.vmap(lambda st: jnp.isfinite(smp.log_density(st)))(init)
+        init, n_init = map_chains(smp.init_state, n_chains)(jax.random.split(k_init, n_chains))
+        finite = map_chains(lambda st: jnp.isfinite(smp.log_density(st)), n_chains)(init)
         res = run_chains(k_run, init, smp.make_step, smp.init_widths(), n_warmup, n_samples, n_chains)
-        params = jax.vmap(jax.vmap(smp.constrain))(res.samples)
+        params = map_chains(jax.vmap(smp.constrain), n_chains)(res.samples)
         return res, params, jnp.sum(n_init), finite
 
     return jax.jit(run)
