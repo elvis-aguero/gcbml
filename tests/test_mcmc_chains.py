@@ -101,20 +101,44 @@ def test_adapt_widths_pools_over_chains_including_their_offsets():
 
 
 def test_run_chains_uses_adapted_widths_after_warmup():
-    seen = []
-
     def make_step(widths):
-        seen.append(np.asarray(widths))
-
-        def step(key, x):  # an exact N(0, 3^2) draw, independent of the state and the widths
-            return 3.0 * jax.random.normal(key, x.shape), {}
+        def step(key, x):  # an exact N(0, 3^2) draw, independent of the state; reports the widths it got
+            return 3.0 * jax.random.normal(key, x.shape), {"w": widths}
 
         return step
 
     res = run_chains(jax.random.key(0), jnp.zeros((4, 1)), make_step, jnp.array([100.0]), 400, 10)
-    np.testing.assert_array_equal(seen[0], [100.0])  # warm-up starts from the given widths
-    np.testing.assert_array_equal(seen[1], np.asarray(res.widths))  # the sampling phase uses the adapted ones
+    np.testing.assert_allclose(
+        res.warmup_info["w"][:, 0] / 400, 100.0
+    )  # warm-up starts from the given widths
+    np.testing.assert_allclose(res.info["w"] / 10, np.broadcast_to(res.widths, (4, 1)))  # sampling: adapted
     assert res.widths[0] == pytest.approx(6.0, rel=0.1)
+
+
+def test_warmup_and_sampling_share_one_compilation():
+    traced = []
+
+    def make_step(widths):
+        traced.append(1)  # runs once per trace
+
+        def step(key, x):
+            return x + jax.random.normal(key, x.shape) * widths, {}
+
+        return step
+
+    res = run_chains(jax.random.key(0), jnp.zeros((4, 2)), make_step, jnp.ones(2), 30, 50)
+    assert len(traced) == 1  # both phases: one program (widths are traced arguments)
+    assert res.samples.shape == (4, 50, 2)
+
+
+def test_chains_run_on_several_devices_when_available():
+    import gcbml.mcmc.chains as ch
+
+    f = ch.map_chains(lambda x: x * 2.0, 4)
+    np.testing.assert_array_equal(
+        jax.jit(f)(jnp.arange(8.0).reshape(4, 2)), 2.0 * np.arange(8.0).reshape(4, 2)
+    )
+    assert (ch.chain_mesh(4) is None) == (len(jax.devices()) == 1)
 
 
 def test_run_chains_with_zero_warmup_keeps_initial_widths():
