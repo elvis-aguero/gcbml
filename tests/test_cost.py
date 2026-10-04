@@ -128,7 +128,9 @@ FAST = dict(n_warmup=150, n_samples=150, n_chains=4)
 def test_integrated_predictive_equals_brute_force_joint_gaussian():
     rng = np.random.default_rng(0)
     n, m, d_u, k, n_pad = 12, 5, 2, 2, 16
-    prior = CostPrior(k0_mean=1.0, k0_sd=2.0, gamma_mean=(3.0, 2.0), gamma_sd=(1.0, 1.5), l_scale=4.0)
+    prior = CostPrior(
+        k0_mean=1.0, k0_sd=2.0, gamma_mean=(3.0, 2.0), gamma_sd=(1.0, 1.5), l_scale=4.0, q_sd=0.4
+    )
     sim = simulate(rng, n, k, d_u=d_u, gamma=(3.0, 2.0), a=0.5, q_frac=0.5)
     data = make_data(sim, n_pad)
     # two hyperparameter draws and two different imputed-y draws
@@ -153,13 +155,13 @@ def test_integrated_predictive_equals_brute_force_joint_gaussian():
 
     # brute force: latent vector (kappa0, gamma, a, omega over n + m runs, eta over n + m runs)
     qbar = sim["log2q"][sim["has_q"]].mean()
-    q = 2 + k
-    b0 = np.array([1.0, 3.0, 2.0, 1.0])
-    B = np.diag([2.0, 1.0, 1.5, 0.5]) ** 2
+    q = 2 + 2 * k
+    b0 = np.array([1.0, 3.0, 2.0, 0.0, 0.0, 1.0])
+    B = np.diag([2.0, 1.0, 1.5, 0.4, 0.4, 0.5]) ** 2
     Uall, Lall = np.vstack([sim["U"], Un]), np.vstack([sim["L"], Ln])
     hq_all = np.concatenate([sim["has_q"], hq_n])
     lq_all = np.concatenate([sim["log2q"], lq_n])
-    A = np.column_stack([np.ones(n + m), Lall, hq_all * (lq_all - qbar)])
+    A = np.column_stack([np.ones(n + m), Lall, Lall**2, hq_all * (lq_all - qbar)])
     X = np_inputs(Uall, Lall, 4.0)
     for s in range(2):
         N = n + m
@@ -192,10 +194,10 @@ def test_posterior_covers_true_gamma(k):
     post = cost.fit_cost(jax.random.key(k), make_data(sim), prior, **FAST)
     draws = sample_coef(post, rng)
     lo, hi = np.percentile(draws, [0.5, 99.5], axis=0)
-    truth = np.concatenate([[5.0], gamma, [0.6]])
+    truth = np.concatenate([[5.0], gamma, [0.0] * k, [0.6]])
     assert np.all((lo <= truth) & (truth <= hi)), (lo, hi, truth)
     # the posterior is informative: much tighter than the gamma prior (sd 1)
-    assert np.all(draws[:, 1 : 1 + k].std(axis=0) < 0.35)
+    assert np.all(draws[:, 1 : 1 + k].std(axis=0) < 0.6)
 
 
 @pytest.mark.slow
@@ -267,27 +269,29 @@ def test_omega_absorbs_a_bend_in_level_and_straight_line_is_biased():
 # ----------------------------------------------------------------------------------------------
 
 
-def test_tobit_gamma_consistent_with_uncensored_naive_is_biased_low():
+def test_tobit_prediction_consistent_with_uncensored_naive_is_biased_low():
     rng = np.random.default_rng(4)
     sim = simulate(rng, 60, 1, gamma=(3.0,), sw=0.3, s_eta=0.3, l_max=4)
     cap = np.quantile(sim["y"], 0.7)
     prior = CostPrior(5.0, 3.0, (3.0,), (1.0,))
     key = jax.random.key(4)
+    Un, Ln = rng.random((20, 1)), np.full((20, 1), 4.0)  # the most censored level
+    no_q = (np.zeros(20), np.zeros(20, bool))
 
-    def gamma_draws(data):
-        return sample_coef(cost.fit_cost(key, data, prior, **FAST), np.random.default_rng(0))[:, 1]
+    def top_level_mean(data):
+        post = cost.fit_cost(key, data, prior, **FAST)
+        mean, var = cost.predict_log2(post, Un, Ln, *no_q)
+        return mixture_moments(mean, var)[0].mean(), np.sqrt(mixture_moments(mean, var)[1].mean())
 
-    g_full = gamma_draws(make_data(sim))
-    g_tobit = gamma_draws(make_data(sim, cap=cap))
+    full, sd_full = top_level_mean(make_data(sim))
     capped = make_data(sim, cap=cap)
+    tobit, _ = top_level_mean(capped)
     assert int(np.sum(np.asarray(capped.censored))) >= 12  # a real fraction is censored
-    naive = capped._replace(censored=jnp.zeros_like(capped.censored))
-    g_naive = gamma_draws(naive)
+    naive, _ = top_level_mean(capped._replace(censored=jnp.zeros_like(capped.censored)))
 
-    gap_tobit = abs(g_tobit.mean() - g_full.mean())
-    gap_naive = g_full.mean() - g_naive.mean()
-    assert gap_tobit < 2 * g_full.std() + 0.05, (gap_tobit, g_full.std())
-    assert gap_naive > 3 * g_full.std(), (gap_naive, g_full.std())  # biased low, clearly
+    gap_tobit, gap_naive = abs(tobit - full), full - naive
+    assert gap_tobit < sd_full, (gap_tobit, sd_full)
+    assert gap_naive > 2 * sd_full, (gap_naive, sd_full)  # biased low, clearly
     assert gap_tobit < 0.5 * gap_naive
 
 
@@ -445,3 +449,59 @@ def test_fit_reports_converging_diagnostics_and_shapes():
     assert post.log2c.shape == (S, bucket(40))
     assert {"sigma_w", "s_eta"} <= set(post.diagnostics)
     assert np.all(np.isfinite(post.diagnostics["sigma_w"]))
+
+
+# ----------------------------------------------------------------------------------------------
+# 8. pricing an unprobed finer level when the log2 step grows with level
+# ----------------------------------------------------------------------------------------------
+
+
+def ladder_coverage(
+    seed, lev_means=None, curvature=None, n_per=8, n_new=20, level_new=3, noise=0.3, noisy_truth=True
+):
+    """Fit levels 0..2 of a ladder with an accelerating log2 step, price level ``level_new``.
+
+    Returns (coverage of the 0.95 cap, E[c] / mean true cost) over n_new fresh runs.
+    """
+    rng = np.random.default_rng(1000 + seed)
+    if lev_means is None:
+        gamma = 3.0
+        curvature = rng.uniform(0.0, 0.6) if curvature is None else curvature
+        lev_means = np.array([gamma * lv + curvature * lv * (lv - 1) / 2 for lv in range(level_new + 1)])
+    lev_means = np.asarray(lev_means, dtype=float)
+    L = np.repeat(np.arange(3), n_per).astype(float)[:, None]
+    U = rng.random((L.shape[0], 2))
+    y = lev_means[L[:, 0].astype(int)] + 0.8 * (U[:, 0] - 0.5) + noise * rng.standard_normal(L.shape[0])
+    prior = CostPrior(float(lev_means[0]), 3.0, (3.0,), (1.0,))
+    data = pad_data(U, L, y, np.zeros(len(y), bool), np.zeros(len(y)), np.zeros(len(y), bool), bucket(len(y)))
+    post = cost.fit_cost(jax.random.key(seed), data, prior, **FAST)
+    Un = rng.random((n_new, 2))
+    truth = lev_means[level_new] + 0.8 * (Un[:, 0] - 0.5)
+    if noisy_truth:  # the realised cost of a new run includes its own noise
+        truth = truth + noise * rng.standard_normal(n_new)
+    mean, var = cost.predict_log2(
+        post, Un, np.full((n_new, 1), float(level_new)), np.zeros(n_new), np.zeros(n_new, bool)
+    )
+    w = np.full(mean.shape[0], 1.0 / mean.shape[0])
+    cap = np.log2(np.asarray(cost.cost_cap(mean, var, w, 0.95)))
+    ec = np.asarray(cost.expected_cost(mean, var, w))
+    return float(np.mean(cap >= truth)), float(ec.mean() / np.mean(2.0**truth))
+
+
+def test_cap_covers_an_unprobed_level_of_the_reviewer_ladder():
+    # per-probe costs 0.015, 0.25, 6, 300 core-hours: log2 steps 4.06, 4.58, 5.64
+    lev = np.log2([0.015, 0.25, 6.0, 300.0])
+    # the reviewer's protocol: 10 runs per level, truth is the noise-free level cost
+    res = [ladder_coverage(sd, lev_means=lev, n_per=10, noisy_truth=False) for sd in (0, 1)]
+    cov = np.mean([r[0] for r in res])
+    assert cov >= 0.8, res
+    assert all(0.5 < r[1] < 2.0 for r in res), res
+
+
+@pytest.mark.slow
+def test_cap_coverage_of_unprobed_level_over_accelerating_ladders():
+    res = np.array([ladder_coverage(sd) for sd in range(24)])
+    cov, ratio = res[:, 0].mean(), np.median(res[:, 1])
+    print(f"unprobed-level coverage of the 0.95 cap: {cov:.3f}; median E[c]/true: {ratio:.3f}")
+    assert cov >= 0.85, (cov, ratio)
+    assert 0.5 < ratio < 2.0, ratio

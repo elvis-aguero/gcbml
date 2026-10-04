@@ -23,13 +23,16 @@ censored values (truncated normal full conditionals). Use gcbml.linalg for every
 
 Implementation notes (W3-B).
 The linear coefficients beta = (kappa0, gamma, a) have a Gaussian prior
-N(b0, B), B = diag(sd^2); with A = [1, L, has_q (log2q - qbar)] the data are Gaussian with covariance
+N(b0, B), B = diag(sd^2); with A = [1, L, L^2, has_q (log2q - qbar)] the data are Gaussian with covariance
 K_t = sigma_w^2 ard_matern52((u, l / l_scale)) + s_eta^2 I + A B A^T and mean A b0. The omega kernel has one
 length scale per input (d_u + k of them), so theta = (log sigma_w, log s_eta, log ell_1..ell_{d_u+k}) has
 2 + d_u + k entries. The prior of s_eta is the exponential with rate -log 0.05 (P(s_eta > 1) = 0.05); the
 (sigma_w, ell_w) prior is priors.pc_matern_logpdf with sigma0 = 1, ell0 = 0.1 (the PC prior is applied per
 ARD length scale, which spec 2.5 calls a heuristic). Censored rows hold log2 cap in ``log2c``.
 Predictions use the imputed log2c of each posterior draw, with beta and omega integrated out exactly.
+Curvature: log2 c also gains sum_j q_j l_j^2 with q_j ~ N(0, q_sd^2) (CostPrior.q_sd, default 0.5 log2
+units per level^2 [assumption]), integrated out like the other coefficients, so that the extrapolation
+variance grows with the distance from the probed levels (the log2 step of a real ladder grows with level).
 ``coef_posterior`` (an addition to the stub) gives beta | y, hyper per draw.
 
 CostData: NamedTuple(U (n_pad, n_controls) unit, L (n_pad, k) float levels, log2c (n_pad,),
@@ -91,6 +94,7 @@ class CostPrior:
     gamma_mean: tuple[float, ...]
     gamma_sd: tuple[float, ...]
     l_scale: float = 4.0
+    q_sd: float | tuple[float, ...] = 0.5
 
 
 class CostPosterior(NamedTuple):
@@ -124,15 +128,18 @@ def _qbar(data: CostData):
 
 
 def _design(L, log2q, has_q, qbar):
-    """A = [1, L, has_q (log2q - qbar)], (n, 2 + k)."""
+    """A = [1, L, L^2, has_q (log2q - qbar)], (n, 2 + 2k)."""
     hq = jnp.asarray(has_q, dtype=float)
     q = hq * (jnp.asarray(log2q, dtype=float) - qbar)
-    return jnp.concatenate([jnp.ones((L.shape[0], 1)), jnp.asarray(L, dtype=float), q[:, None]], axis=1)
+    L = jnp.asarray(L, dtype=float)
+    return jnp.concatenate([jnp.ones((L.shape[0], 1)), L, L**2, q[:, None]], axis=1)
 
 
 def _beta_prior(prior: CostPrior):
-    b0 = jnp.asarray([prior.k0_mean, *prior.gamma_mean, A_PRIOR_MEAN], dtype=float)
-    bsd = jnp.asarray([prior.k0_sd, *prior.gamma_sd, A_PRIOR_SD], dtype=float)
+    k = len(prior.gamma_mean)
+    qsd = np.broadcast_to(np.asarray(prior.q_sd, dtype=float), (k,))
+    b0 = jnp.asarray([prior.k0_mean, *prior.gamma_mean, *([0.0] * k), A_PRIOR_MEAN], dtype=float)
+    bsd = jnp.asarray([prior.k0_sd, *prior.gamma_sd, *qsd, A_PRIOR_SD], dtype=float)
     return b0, bsd
 
 
@@ -266,9 +273,10 @@ def fit_cost(
 
 
 def coef_posterior(post: CostPosterior):
-    """Posterior of beta = (kappa0, gamma, a) given y and the hyperparameters, per draw.
+    """Posterior of beta = (kappa0, gamma, q, a) given y and the hyperparameters, per draw.
 
-    Returns (mean (S, 2 + k), cov (S, 2 + k, 2 + k)); Gaussian, with omega and eta integrated out:
+    Returns (mean (S, 2 + 2k), cov (S, 2 + 2k, 2 + 2k)) in the order (kappa0, gamma, q, a);
+    Gaussian, with omega and eta integrated out:
     mean = b0 + B A^T K_t^{-1} (y - A b0), cov = B - B A^T K_t^{-1} A B.
     """
     ctx = _context(post.data, post.prior)
