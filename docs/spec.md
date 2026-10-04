@@ -269,7 +269,7 @@ $$ \sigma_{env}^2(x, h) = E_{\vartheta, c, \mu \mid D} [ \sum_j \bar h_j^{2 p_j(
 | Gate | Test | Pass rule |
 |---|---|---|
 | G0 order | posterior of \(p_{j0}\); observed increment ratios | \(P(p_{j0} > 0.5) \ge 0.9\) **and** the posterior sd of \(\log p_{j0}\) is at most 0.5 (half its prior sd), so the prior cannot pass G0 alone (the prior already gives \(P(p > 0.5) = 0.76\)). When \(P(\sigma_\pi > 0.05 \mid D) \ge 0.9\) (the order varies with \(x\)), it also needs \(P(p_j(x) > 0.5) \ge 0.9\) at every \(x \in \Sigma_N\). **A failure does not stop the method.** It means the limit is not yet identified, so \(\sigma_{epi}\) is large, and Step 5 then prefers finer levels if A12 holds. E&H treat \(p < 0.5\) as anomalous. |
-| G1 level hold-out | cross-fitted prediction of the finest level | 95% coverage within binomial limits; no sign bias; \(C_{LOO}\) near 1 (Bachoc 1301.4320 eq 6; Oliver 1311.0828 eq 17) |
+| G1 level hold-out | cross-fitted prediction of the finest level, a predictive check of the finest mesh as in Oliver et al. 1311.0828 eq 17 | 95% coverage within binomial limits; no sign bias; \(C_{LOO}\) near 1 (Bachoc 1301.4320 eq 6) |
 | G2 block LOO | leave out whole runs | z ~ N(0, 1); U statistic (Overstall & Woods eq 10) |
 | G3 noise | replicate spread against \(s^2\) | chi-square, p > 0.05 |
 | G4 pre-asymptotic | refit without the coarsest level | the target moves less than \(\sigma_{epi}\); else remove that level |
