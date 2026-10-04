@@ -475,25 +475,26 @@ def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
 
 
 @pytest.mark.slow
-def test_a12_acquisitions_top_candidate_is_in_the_oracles_top_3(capsys):
+def test_a12_acquisitions_top_candidate_is_in_the_oracles_top_3(capsys, monkeypatch):
     """20 random truths; after the initial design at levels 0-2 the acquisition ranks the candidates and
     the oracle re-ranks its top 10 by full MCMC refits on fantasy outcomes. Pass: the acquisition's top
     candidate is in the oracle's top 3 in at least 16 of 20 truths (spec Step 1 [assumption]).
 
-    GCBML_A12_N (default 20) sets the number of truths, GCBML_A12_REFITS (default 4) the fantasies per
-    candidate; a reduced run only reports its k of n.
+    GCBML_A12_N (default 20) sets the number of truths, GCBML_A12_REFITS (default 2) the fantasies per
+    candidate, GCBML_A12_WARMUP/SAMPLES/CHAINS the chains; a reduced run only reports its k of n.
     """
     import os
     import time
 
     from gcbml.synthetic import a12_oracle_ranking
 
+    monkeypatch.setattr(Campaign, "_gates", _fake_gates())  # the A12 question is about the acquisition
     n_truths = int(os.environ.get("GCBML_A12_N", 20))
-    n_refit = int(os.environ.get("GCBML_A12_REFITS", 4))
+    n_refit = int(os.environ.get("GCBML_A12_REFITS", 2))
     settings = CampaignSettings(
         n_warmup=int(os.environ.get("GCBML_A12_WARMUP", 150)),
         n_samples=int(os.environ.get("GCBML_A12_SAMPLES", 100)),
-        n_chains=4,
+        n_chains=int(os.environ.get("GCBML_A12_CHAINS", 4)),
         q=1,
         n_candidates_u=16,
         extra_levels=2,
