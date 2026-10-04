@@ -342,7 +342,7 @@ def test_ess_fallback_is_triggered_and_reported_with_the_default_threshold():
     eps = 0.1
     c_fine = cand(0.5, 0.25, nv=1e-4)
     key = jax.random.key(4)
-    default = acq.expected_gain_detail(key, structs, data, c_fine, XS, eps, 32)  # default ess_min = 10 > 2 draws
+    default = acq.expected_gain_detail(key, structs, data, c_fine, XS, eps, 32)  # ess_min 10 > 2 draws
     assert default.fallback_frac == 1.0
     keep = acq.expected_gain_detail(key, structs, data, c_fine, XS, eps, 32, ess_min=np.inf)
     np.testing.assert_allclose(default.gain, keep.gain, rtol=1e-12)  # the fallback IS 'keep the weights'
