@@ -12,7 +12,10 @@ b_sj ~ N(0, b_s_sd^2) (symmetric: the spread may grow or shrink with h, spec 2.4
 (sigma_z, ell_z) PC prior (priors.pc_matern_logpdf, per ARD length scale) with sigma0 = 1 (log-variance
 units: a factor e in the variance) and ell0 = PriorScales.ell0.
 
-TODO(W3-A): implement.
+Implementation notes. Site extraction runs outside jit (NumPy, exact float equality on (u, hbar)); the
+padded site rows copy site 0, so every array stays finite. Sites are numbered in order of first
+appearance. zeta_cov has the identity on the padded block, so a Cholesky factor of it exists and the
+padded zeta values (which no row reads) are independent N(0, 1) draws that never enter a likelihood.
 
 build_sites(data, n_controls) -> (sites (n_sites_pad, n_controls + k), row_site (n_pad,), site_mask)
     Unique (u, hbar) pairs of the real rows of PaddedData (u = the first n_controls columns of X),
@@ -27,18 +30,70 @@ log_prior(m_s, b_s, log_sigma_z, log_ell_z, scales) -> scalar
 
 from __future__ import annotations
 
+import math
+
+import jax.numpy as jnp
+import numpy as np
+
+from gcbml._config import bucket
+from gcbml.kernels import ard_matern
+from gcbml.priors import PriorScales, normal_logpdf, pc_matern_logpdf
+
+
+def unique_rows(A, mask):
+    """Distinct rows of the real rows of A (first-appearance order), padded to a bucket size.
+
+    Returns (rows (m_pad, c), row_index (n,), row_mask (m_pad,)). Padded rows of ``rows`` copy row 0 and
+    ``row_index`` is 0 on masked rows. Exact equality (replicates repeat the same floats).
+    """
+    A = np.asarray(A, dtype=float)
+    mask = np.asarray(mask, dtype=bool)
+    n = A.shape[0]
+    index = np.zeros(n, dtype=np.int64)
+    seen: dict[tuple, int] = {}
+    reps: list[int] = []
+    for i in np.flatnonzero(mask):
+        key = tuple(A[i])
+        if key not in seen:
+            seen[key] = len(reps)
+            reps.append(i)
+        index[i] = seen[key]
+    m = len(reps)
+    if m == 0:
+        raise ValueError("no real rows")
+    m_pad = bucket(m)
+    rows = np.repeat(A[reps[0]][None, :], m_pad, axis=0)
+    rows[:m] = A[reps]
+    row_mask = np.zeros(m_pad, dtype=bool)
+    row_mask[:m] = True
+    return rows, index, row_mask
+
 
 def build_sites(data, n_controls: int):
-    raise NotImplementedError("W3-A")
+    A = np.hstack([np.asarray(data.X, dtype=float)[:, :n_controls], np.asarray(data.H, dtype=float)])
+    return unique_rows(A, data.mask)
 
 
 def noise_var(m_s, b_s, zeta, sites, row_site, data_mask):
-    raise NotImplementedError("W3-A")
+    b_s = jnp.asarray(b_s, dtype=float)
+    sites = jnp.asarray(sites, dtype=float)
+    k = b_s.shape[0]
+    log_s2_site = m_s + sites[:, sites.shape[1] - k :] @ b_s + jnp.asarray(zeta, dtype=float)
+    s2 = jnp.exp(log_s2_site)[jnp.asarray(row_site)]
+    return jnp.where(jnp.asarray(data_mask, dtype=bool), s2, 1.0)
 
 
 def zeta_cov(log_sigma_z, log_ell_z, sites, site_mask):
-    raise NotImplementedError("W3-A")
+    sites = jnp.asarray(sites, dtype=float)
+    site_mask = jnp.asarray(site_mask, dtype=bool)
+    K = jnp.exp(2.0 * log_sigma_z) * ard_matern(sites, sites, jnp.exp(log_ell_z), 2.5)
+    both = site_mask[:, None] & site_mask[None, :]
+    return jnp.where(both, K, 0.0) + jnp.diag(jnp.where(site_mask, 0.0, 1.0))
 
 
-def log_prior(m_s, b_s, log_sigma_z, log_ell_z, scales):
-    raise NotImplementedError("W3-A")
+def log_prior(m_s, b_s, log_sigma_z, log_ell_z, scales: PriorScales):
+    return (
+        normal_logpdf(m_s, 2.0 * math.log(scales.S_noise), math.log(10.0))
+        + normal_logpdf(b_s, 0.0, scales.b_s_sd)
+        + pc_matern_logpdf(log_sigma_z, log_ell_z, 1.0, scales.ell0)
+    )
