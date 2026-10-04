@@ -325,3 +325,130 @@ def censored_sweep(key, params: ModelParams, data, z, cfg: ModelConfig, bounds):
 
     (z_new, _), _ = jax.lax.scan(step, (z, Qr), (jnp.arange(n), jax.random.split(key, n), do))
     return z_new
+
+
+# ----------------------------------------------------------------------------------------------
+# Joint predictive of the outputs of one new run (used by acquisition and forecast, spec Step 5)
+# ----------------------------------------------------------------------------------------------
+
+
+class _NewBlocks(NamedTuple):
+    cross: jnp.ndarray  # (n, m) covariance data rows x new rows, without the beta term, zero on padded rows
+    k_new: jnp.ndarray  # (m, m) prior covariance of the new rows (without the beta term), noise included
+    A_new: jnp.ndarray  # (m, q) diag(rho1_new) M_new
+    rho0_new: jnp.ndarray  # (m,)
+    rho1_new: jnp.ndarray  # (m,)
+
+
+class JointNew(NamedTuple):
+    """Joint predictive of m new outputs (Lambda units), beta integrated.
+
+    mean (m,), cov (m, m): posterior mean and covariance of the new outputs (noise included) given z.
+    cross (n, m), k_new (m, m): the blocks to give to linalg.append on the factor that predict_mu and
+    log_marginal build (flat beta: the factor of K; Gaussian beta: the factor of K + A diag(bsd^2) A^T, so
+    both blocks then include the beta term). A_new (m, q), rho0_new (m,): the new rows' mean basis.
+    """
+
+    mean: jnp.ndarray
+    cov: jnp.ndarray
+    cross: jnp.ndarray
+    k_new: jnp.ndarray
+    A_new: jnp.ndarray
+    rho0_new: jnp.ndarray
+
+
+def _new_noise(params: ModelParams, cfg: ModelConfig, Xn, nv, group):
+    """Noise covariance of new rows: D R D inside a group (one run), zero across groups; exact diagonal nv."""
+    m = nv.shape[0]
+    if not cfg.within_run:
+        return jnp.diag(nv)
+    if not cfg.v_index:
+        raise ValueError("within_run=True needs cfg.v_index (the columns of X that are output coordinates)")
+    V = Xn[:, jnp.asarray(cfg.v_index)]
+    r2 = jnp.maximum(jnp.sum((V[:, None, :] - V[None, :, :]) ** 2, axis=-1), 0.0)
+    R = matern(jnp.sqrt(r2) / params.ell_v, 1.5)
+    same = group[:, None] == group[None, :]
+    sd = jnp.sqrt(nv)
+    off = jnp.where(same, sd[:, None] * sd[None, :] * R, 0.0)
+    return jnp.where(jnp.eye(m, dtype=bool), jnp.diag(nv), off)
+
+
+def _new_blocks(params: ModelParams, data, cfg: ModelConfig, S: _Setup, Xn, Hn, Pn, nv, group) -> _NewBlocks:
+    """Covariance blocks of new rows with the data and among themselves (no beta term).
+
+    New rows never belong to a run of the data (their noise is independent of the data's); rows with the
+    same ``group`` id belong to one new run (within-run correlation if cfg.within_run).
+    """
+    X = jnp.asarray(data.X, dtype=float)
+    H = jnp.asarray(data.H, dtype=float)
+    Xn, Hn, Pn = (jnp.asarray(a, dtype=float) for a in (Xn, Hn, Pn))
+    rho0n, rho1n = rho(params, Hn, Pn)
+    An = rho1n[:, None] * mean_basis(Xn, cfg.mean_basis)
+    Kg = params.sigma_mu**2 * ard_matern(X, Xn, params.ell_mu, cfg.nu_x)
+    Kd = delta_cov(X, H, Xn, Hn, params.P, Pn, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    cross = jnp.where(S.mask[:, None], S.rho1[:, None] * Kg * rho1n[None, :] + Kd, 0.0)
+    Knn = params.sigma_mu**2 * ard_matern(Xn, Xn, params.ell_mu, cfg.nu_x)
+    k_new = rho1n[:, None] * Knn * rho1n[None, :]
+    k_new = k_new + delta_cov(Xn, Hn, Xn, Hn, Pn, Pn, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    k_new = k_new + _new_noise(params, cfg, Xn, jnp.asarray(nv, dtype=float), jnp.asarray(group))
+    return _NewBlocks(cross, k_new, An, rho0n, rho1n)
+
+
+def _posterior_joint(params, data, z, cfg: ModelConfig, S: _Setup, offset, Au, Cdu, Kuu):
+    """Joint posterior (mean (u,), cov (u, u)) of u = offset + Au beta + g_u, beta integrated.
+
+    Cdu (n, u): covariance of the data rows with u without the beta term (zero on padded rows); Kuu (u, u):
+    prior covariance of u without the beta term. Same formulas as _posterior, with the full covariance.
+    """
+    z = jnp.asarray(z, dtype=float)
+    if cfg.beta_prior is None:
+        r = jnp.where(S.mask, z - S.rho0, 0.0)
+        F, KiA, Fg = _flat_pieces(S)
+        Kir = linalg.solve(F, r)
+        bhat = linalg.solve(Fg, S.A.T @ Kir)
+        KiC = linalg.solve(F, Cdu)
+        mean = offset + Au @ bhat + Cdu.T @ (Kir - KiA @ bhat)
+        Rm = Au.T - S.A.T @ KiC
+        cov = Kuu - Cdu.T @ KiC + Rm.T @ linalg.solve(Fg, Rm)
+    else:
+        b0, bsd = _beta_prior(cfg)
+        Kt = S.K + (S.A * bsd**2) @ S.A.T
+        Ct = Cdu + S.A @ ((bsd**2)[:, None] * Au.T)
+        Ktuu = Kuu + (Au * bsd**2) @ Au.T
+        r = jnp.where(S.mask, z - S.rho0 - S.A @ b0, 0.0)
+        F = linalg.factor(Kt, S.mask)
+        mean = offset + Au @ b0 + Ct.T @ linalg.solve(F, r)
+        V = jax.scipy.linalg.solve_triangular(F.L, Ct, lower=True)
+        cov = Ktuu - V.T @ V
+    return mean, 0.5 * (cov + cov.T)
+
+
+def joint_new(
+    params: ModelParams, data, z, cfg: ModelConfig, Xn, Hn, Pn, same_run: bool = True, noise_var_new=None
+):
+    """Joint predictive of the m outputs of ONE new run, given the data, with beta integrated (spec Step 5).
+
+    Xn (m, d) unit coordinates (output coordinates v in the columns cfg.v_index), Hn (m, k) hbar, Pn (m, k)
+    orders. The outputs are z_i = rho0_i + rho1_i mu(x_i) + delta(x_i, h_i) + e_i as in the module docstring;
+    the new rows are in a run of their own, so their noise is independent of the data's, and correlated
+    within the run through ell_v if cfg.within_run and same_run (same_run=False: m separate runs).
+    noise_var_new (m,): noise variance of each new output; None means noise-free (the latent level values).
+    Returns a JointNew; its mean and cov are the posterior of the new outputs (flat beta: the universal
+    kriging formulas, including the variance from estimating beta), and its cross and k_new are the blocks
+    for linalg.append (see JointNew). The Gaussian conditioning of the posterior of any quantity on the
+    new values equals the posterior from the enlarged data: appending the rows gives the factor of the
+    enlarged covariance to round-off (tests/test_model_joint_new.py).
+    """
+    S = _setup(params, data, cfg)
+    Xn = jnp.asarray(Xn, dtype=float)
+    m = Xn.shape[0]
+    nv = jnp.zeros(m) if noise_var_new is None else jnp.asarray(noise_var_new, dtype=float)
+    group = jnp.zeros(m, dtype=int) if same_run else jnp.arange(m)
+    nb = _new_blocks(params, data, cfg, S, Xn, Hn, Pn, nv, group)
+    mean, cov = _posterior_joint(params, data, z, cfg, S, nb.rho0_new, nb.A_new, nb.cross, nb.k_new)
+    cross, k_new = nb.cross, nb.k_new
+    if cfg.beta_prior is not None:
+        _, bsd = _beta_prior(cfg)
+        cross = cross + S.A @ ((bsd**2)[:, None] * nb.A_new.T)
+        k_new = k_new + (nb.A_new * bsd**2) @ nb.A_new.T
+    return JointNew(mean, cov, cross, k_new, nb.A_new, nb.rho0_new)
