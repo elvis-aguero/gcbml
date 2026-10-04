@@ -21,10 +21,8 @@ g1_level_holdout(z_B, inside95_B, testable=True)
         right, with var C_LOO given by eq 27 (a trace; bounded below by (2/n)(lmin/lmax)^2). For
         independent z_i, var C_LOO = 2/n: the acceptance band |C_LOO - 1| <= 2 sqrt(2/n) is an ASSUMPTION
         built on that case, and is too tight for correlated z.
-    Oliver et al. (1311.0828) is NOT the source of C_LOO: its eq 17 is the prediction of the observable
-    at mesh size h, <q_h> = E[q] - C_0 h^p - e_{h,N}, used as a validity check (the held-out observation
-    must be a plausible draw from it). Spec Section 3, G1 attributes C_LOO to "Oliver eq 17": wrong,
-    the prediction check of eq 17 is what the hold-out and the coverage test implement.
+    The hold-out and the coverage test implement the finest-mesh predictive check of Oliver et al.
+    (1311.0828, eq 17: <q_h> = E[q] - C_0 h^p - e_{h,N}; the observation must be a plausible draw from it).
 g2_block_loo(params, data, z, cfg, blocks, w=None) leave out whole runs. Closed-form block LOO of a GP with
     fixed parameters (block_loo below), per draw; draws are pooled by moments (below); the left-out outputs
     are whitened with the Cholesky factor of the pooled covariance, e = L^{-1}(z_b - mean_b). Pass if the
