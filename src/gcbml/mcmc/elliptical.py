@@ -10,8 +10,8 @@ ess_step(key, f, prior_chol, loglik) -> (f_new, n_evals)
     the bracket toward 0 (step 8: theta < 0 sets the lower end, else the upper end) and draw a new
     theta uniformly in it (steps 9-10).
 
-    The shrinkage loop is a lax.while_loop bounded: at most MAX_SHRINK = 200 proposals in total. If the bound is
-    hit, f is returned unchanged (the identity move keeps the target invariant) and
+    The shrinkage loop is a bounded lax.while_loop: at most MAX_SHRINK = 200 proposals in total. If the
+    bound is hit, f is returned unchanged (the identity move keeps the target invariant) and
     ess_step_info reports it through its third output; ess_step keeps the two-value interface of the
     specification. n_evals = 1 (loglik(f), step 2) + the number of proposals.
 
