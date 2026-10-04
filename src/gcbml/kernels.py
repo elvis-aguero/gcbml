@@ -4,8 +4,6 @@ All functions are pure jax.numpy, jit- and vmap-compatible, and return dense mat
 Inputs are unit-scaled x in [0,1]^d and scaled resolutions hbar = h / h_c > 0 (hbar = 0 is allowed
 and must give zero variance for the error kernels).
 
-TODO(W1-A): implement every function below exactly as documented.
-
 matern(r, nu)
     Matérn correlation of a scaled distance r >= 0, for nu in {0.5, 1.5, 2.5}:
       nu=0.5: exp(-r);  nu=1.5: (1 + sqrt3 r) exp(-sqrt3 r);  nu=2.5: (1 + sqrt5 r + 5 r^2/3) exp(-sqrt5 r).
@@ -37,6 +35,7 @@ delta_cov(X1, H1, X2, H2, P1, P2, comps, h_kernel, nu_x, nu_h)
 
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import jax.numpy as jnp
@@ -53,22 +52,67 @@ class DeltaParams(NamedTuple):
 
 
 def matern(r: jnp.ndarray, nu: float) -> jnp.ndarray:
-    raise NotImplementedError("W1-A")
+    """Matern correlation of a scaled distance r >= 0 for nu in {0.5, 1.5, 2.5}."""
+    r = jnp.asarray(r, dtype=float)
+    if nu == 0.5:
+        return jnp.exp(-r)
+    if nu == 1.5:
+        a = math.sqrt(3.0) * r
+        return (1.0 + a) * jnp.exp(-a)
+    if nu == 2.5:
+        a = math.sqrt(5.0) * r
+        return (1.0 + a + 5.0 * r**2 / 3.0) * jnp.exp(-a)
+    raise ValueError(f"nu must be 0.5, 1.5 or 2.5, got {nu!r}")
 
 
 def ard_matern(X1: jnp.ndarray, X2: jnp.ndarray, ell: jnp.ndarray, nu: float) -> jnp.ndarray:
-    raise NotImplementedError("W1-A")
+    """(n1, n2) ARD Matern correlation matrix; exactly symmetric when X1 is X2."""
+    diff = (X1[:, None, :] - X2[None, :, :]) / ell
+    r2 = jnp.maximum(jnp.sum(diff**2, axis=-1), 0.0)
+    return matern(jnp.sqrt(r2), nu)
+
+
+def _hpow(h, p):
+    """h**p with exactly 0 (and a finite gradient) at h = 0."""
+    pos = h > 0
+    return jnp.where(pos, jnp.where(pos, h, 1.0) ** p, 0.0)
 
 
 def twy2(h1, h2, p1, p2, ell_h, nu: float = 1.5) -> jnp.ndarray:
-    raise NotImplementedError("W1-A")
+    """k(i, j) = h1_i^{p1_i} h2_j^{p2_j} matern(|h1_i - h2_j| / ell_h, nu), exactly 0 where hbar = 0."""
+    h1, h2 = jnp.asarray(h1, dtype=float), jnp.asarray(h2, dtype=float)
+    b1, b2 = _hpow(h1, p1), _hpow(h2, p2)
+    d = jnp.abs(h1[:, None] - h2[None, :]) / ell_h
+    return b1[:, None] * b2[None, :] * matern(d, nu)
 
 
 def lifted_brownian(h1, h2, p, gamma, a=1.0) -> jnp.ndarray:
-    raise NotImplementedError("W1-A")
+    """0.5 a (h1^{2p} + h2^{2p} - |h1^{p/gamma} - h2^{p/gamma}|^{2 gamma}), shared order p."""
+    h1, h2 = jnp.asarray(h1, dtype=float), jnp.asarray(h2, dtype=float)
+    d = jnp.abs(_hpow(h1, p / gamma)[:, None] - _hpow(h2, p / gamma)[None, :])
+    pos = d > 0
+    dpow = jnp.where(pos, jnp.where(pos, d, 1.0) ** (2.0 * gamma), 0.0)
+    k = 0.5 * a * (_hpow(h1, 2.0 * p)[:, None] + _hpow(h2, 2.0 * p)[None, :] - dpow)
+    # exact zero in any row/column with hbar = 0 (the formula cancels only to round-off)
+    return jnp.where((h1 > 0)[:, None] & (h2 > 0)[None, :], k, 0.0)
 
 
 def delta_cov(
     X1, H1, X2, H2, P1, P2, comps: DeltaParams, h_kernel: str, nu_x: float = 2.5, nu_h: float = 1.5
 ) -> jnp.ndarray:
-    raise NotImplementedError("W1-A")
+    """Additive multi-component error covariance sum_j sigma_j^2 k_x,j k_h,j (spec 2.3).
+
+    For ``h_kernel == "lb"`` the order is shared, so it is read from row 0 of column j of P1 (and P2 is
+    ignored): put real rows first and keep the column constant.
+    """
+    if h_kernel not in ("twy2", "lb"):
+        raise ValueError(f"h_kernel must be 'twy2' or 'lb', got {h_kernel!r}")
+    K = 0.0
+    for j in range(comps.sigma.shape[0]):
+        kx = ard_matern(X1, X2, comps.ell_x[j], nu_x)
+        if h_kernel == "twy2":
+            kh = twy2(H1[:, j], H2[:, j], P1[:, j], P2[:, j], comps.ell_h[j], nu_h)
+        else:
+            kh = lifted_brownian(H1[:, j], H2[:, j], P1[0, j], comps.gamma[j])
+        K = K + comps.sigma[j] ** 2 * kx * kh
+    return K
