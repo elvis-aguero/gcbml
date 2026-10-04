@@ -32,7 +32,7 @@ MAX_SHRINK = 100
 
 
 def _step_out_side(logdensity_1d, edge, j, w, logy, sign):
-    """Fig. 3: move ``edge`` outwards (sign = -1 left, +1 right) by w while j > 0 and the edge is inside the slice."""
+    """Fig. 3: move ``edge`` outwards (sign -1 left, +1 right) by w while j > 0 and it is inside the slice."""
     has = j > 0
     inside0 = lax.cond(has, lambda: logdensity_1d(edge) > logy, lambda: jnp.array(False))
 

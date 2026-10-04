@@ -4,7 +4,7 @@ import numpy as np
 
 
 def batch_se(series, n_batches=25):
-    """Monte Carlo standard error of the mean of ``series`` (axis 0 is time) by non-overlapping batch means."""
+    """Monte Carlo standard error of the mean of ``series`` (axis 0 is time) by batch means."""
     series = np.asarray(series, dtype=float)
     n = (series.shape[0] // n_batches) * n_batches
     b = series[:n].reshape(n_batches, -1, *series.shape[1:]).mean(axis=1)
