@@ -48,7 +48,7 @@ sigma_epi_physical(structures, data, Xs) -> (s,)
 H_value(sigma_epi, eps, mode="hinge", beta=20.0) -> scalar
 expected_gain(key, structures, data, cand, Xs, eps, n_fantasy, mode) -> (gain, mc_se)
 select_batch(key, structures, data, candidates, Xs, eps, q, budget_remaining, pending=(), mode="hinge",
-             max_draws=64) -> (chosen indices list, table of (gain, cost_mean, ratio, admissible) per candidate)
+             max_draws=64) -> (chosen indices, table of (gain, cost_mean, ratio, admissible) per candidate)
     max_draws: subsample this many pooled draws (by weight, systematic resampling) for speed; document it.
 """
 
