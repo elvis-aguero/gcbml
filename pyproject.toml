@@ -30,6 +30,7 @@ cuda = ["jax[cuda12]>=0.7"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-m 'not slow'"
 markers = ["slow: long statistical or benchmark test; run on a compute node with `-m slow`"]
 
