@@ -396,18 +396,21 @@ class _Sampler:
         move: it is efficient when the data constrain zeta weakly (few replicates), where the centred and the
         surrogate parametrisations mix slowly.
         """
-        L0 = jnp.linalg.cholesky(self.zeta_cov(hz))
+        sm = self.aux.site_mask
+        # the jittered factor of linalg (as the elliptical move): a plain Cholesky fails for the large ell_z
+        # that the PC prior favours, which would truncate the prior
+        L0 = linalg.factor(self.zeta_cov(hz), sm).L
         eps = jax.scipy.linalg.solve_triangular(L0, zeta, lower=True)
         ok0 = jnp.all(jnp.isfinite(eps))
 
         def logdens(h):
-            L = jnp.linalg.cholesky(self.zeta_cov(h))
+            L = linalg.factor(self.zeta_cov(h), sm).L
             lp = self.log_prior_hz(h) + loglik(L @ eps)
             return jnp.where(jnp.isfinite(lp), lp, -jnp.inf)
 
         h_new, n = slice_step(key, hz, logdens, width)
         h_new = jnp.where(ok0, h_new, hz)
-        L1 = jnp.linalg.cholesky(self.zeta_cov(h_new))
+        L1 = linalg.factor(self.zeta_cov(h_new), sm).L
         return h_new, jnp.where(ok0, L1 @ eps, zeta), n
 
     # --- one Gibbs iteration ---------------------------------------------------------------
