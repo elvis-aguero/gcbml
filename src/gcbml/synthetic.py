@@ -78,6 +78,7 @@ class SyntheticTruth:
     cost_sigma: float = 0.1
     cost_base: float = 2.0
     cost_gamma: float = 3.0
+    cost_unit: float = 1.0  # cost of a level-0 run before the lognormal factor
     d: int = 1
     budget: float = 1000.0
     eps_abs: float = 0.05
@@ -134,7 +135,9 @@ class SyntheticOracle:
             self.n_submitted += 1
             z_noise, z_cost = self._normals(probe)
             lev = _level_of(probe.h[0])
-            cost = float(t.cost_base ** (t.cost_gamma * lev) * math.exp(self.cost_sigma * z_cost))
+            cost = float(
+                t.cost_unit * t.cost_base ** (t.cost_gamma * lev) * math.exp(self.cost_sigma * z_cost)
+            )
             x = np.asarray(probe.u, dtype=float)[None, :]
             if cost > cap:
                 d = x.shape[1]
