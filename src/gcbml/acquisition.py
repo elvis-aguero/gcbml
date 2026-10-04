@@ -71,10 +71,11 @@ How it is computed (W4-B) and where it differs from the stubs:
   * Fantasies: the draw and the output come from the pooled weights; reweighting is within each structure
     (structure weights fixed, as the spec says); a fantasy drawn in the units of one structure is mapped to
     the others through Lambda^{-1} (Jacobians cancel within a structure). ESS is that of the pooled weights;
-    if ESS < ess_min the weights are kept (ess_min: keyword added to expected_gain and select_batch, default
-    50 as in the spec). NOTE: with max_draws = 64 and ess_min = 50, the ESS rule keeps the weights whenever
-    reweighting would cut the effective draws by more than 22%, so reweighting is mostly disabled; a relative
-    threshold (e.g. 0.25 D) may serve better. Reviewer's decision.
+    if ESS < ess_min the weights are kept (ess_min: keyword added to expected_gain and select_batch).
+    Default 10 [assumption, reviewer 2026-10-04]: the spec's 50 nearly disables reweighting at max_draws = 64
+    (it falls back whenever the effective draws drop by more than 22%), and it falls back exactly for the
+    probes that are most informative about the order p, i.e. it undervalues unprobed finer levels (A12).
+    The A12 synthetic test decides the final value.
   * Fantasies per candidate: 16 for every admissible one, then doubled for the best two only, until the s.e.
     of the best ratio is below 10% of its gap to the second best or 256 is reached (spec: "doubled until").
   * Variance-only property: with one draw and the identity, sigma_epi does not depend on the fantasy value, so
@@ -526,7 +527,7 @@ def expected_gain_detail(
     eps,
     n_fantasy: int,
     mode: str = "hinge",
-    ess_min: float = 50.0,
+    ess_min: float = 10.0,
 ) -> GainDetail:
     """expected_gain with the number of fantasies and the share that kept the weights (ESS < ess_min)."""
     pool = _build_pool(structures, data, Xs, [cand])
@@ -543,7 +544,7 @@ def expected_gain(
     eps,
     n_fantasy: int,
     mode: str = "hinge",
-    ess_min: float = 50.0,
+    ess_min: float = 10.0,
 ):
     """Expected gain of one candidate by n_fantasy fantasies: (gain >= 0, Monte Carlo s.e. of its mean)."""
     d = expected_gain_detail(key, structures, data, cand, Xs, eps, n_fantasy, mode, ess_min)
@@ -644,7 +645,7 @@ def select_batch(
     pending=(),
     mode: str = "hinge",
     max_draws: int = 64,
-    ess_min: float = 50.0,
+    ess_min: float = 10.0,
     n_fantasy_start: int = 16,
     n_fantasy_max: int = 256,
 ):
