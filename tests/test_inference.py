@@ -289,11 +289,14 @@ def test_varying_order_is_ignored_for_lb():
 # ----------------------------------------------------------------------------------------------
 
 
-def np_pc_sample(rng, sigma0, ell0, size_ell, alpha=0.05):
-    """(log sigma, log ell) from the PC prior: sigma ~ Exp(l2); rho = ell^{-1/2} ~ Exp(l1)."""
+def np_pc_sample(rng, sigma0, ell0, n_ell, n=None, alpha=0.05):
+    """(log sigma, log ell) from the PC prior: sigma ~ Exp(l2); rho = ell^{-1/2} ~ Exp(l1).
+
+    One draw (log sigma scalar, log ell of shape (n_ell,)), or n draws (shapes (n,), (n, n_ell))."""
     l1, l2 = -np.log(alpha) * np.sqrt(ell0), -np.log(alpha) / sigma0
-    log_sigma = np.log(rng.exponential(1.0 / l2))
-    log_ell = -2.0 * np.log(rng.exponential(1.0 / l1, size=size_ell))
+    shape_s = () if n is None else (n,)
+    log_sigma = np.log(rng.exponential(1.0 / l2, size=shape_s))
+    log_ell = -2.0 * np.log(rng.exponential(1.0 / l1, size=shape_s + (n_ell,)))
     return log_sigma, log_ell
 
 
@@ -336,13 +339,13 @@ def test_prior_only_sampling_reproduces_prior_marginals():
     ref["c0"], ref["c1"] = rng.normal(0.0, sc.S_c, R), rng.normal(0.0, sc.S_c, R)
     ref["log_p0"] = rng.normal(sc.log_p_mean, sc.log_p_sd, R)
     ref["log_ell_h"] = rng.normal(np.log(0.5), 1.0, R)
-    s, e = np_pc_sample(rng, sc.S_mu, sc.ell0, R)
+    s, e = np_pc_sample(rng, sc.S_mu, sc.ell0, 1, R)
     ref["log_sigma_mu"], ref["log_ell_mu"] = s, e
-    s, e = np_pc_sample(rng, sc.S_delta, sc.ell0, R)
+    s, e = np_pc_sample(rng, sc.S_delta, sc.ell0, 1, R)
     ref["log_sigma_delta"], ref["log_ell_x"] = s, e
-    s, e = np_pc_sample(rng, 1.0, sc.ell0, (R, 2))
+    s, e = np_pc_sample(rng, 1.0, sc.ell0, 2, R)
     ref["log_sigma_z"], ref["log_ell_z"] = s, e
-    s, e = np_pc_sample(rng, 0.3, 0.1, R)
+    s, e = np_pc_sample(rng, 0.3, 0.1, 1, R)
     ref["log_sigma_pi"], ref["log_ell_pi"] = s, e
     pvals = {}
     for name, r in ref.items():
