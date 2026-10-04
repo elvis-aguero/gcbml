@@ -2,9 +2,9 @@
 
 Seven cheap NumPy/SciPy solvers. The grid error of each is produced by a real discretisation (never a formula added to the answer). Each has a converged value at h = 0 that is known in closed form; the derivation is in the module docstring and a test checks it. Every problem implements `benchmarks.base.BenchmarkProblem`: `problem()`, `run(probe, seed)`, `truth(x_unit)`, `expected_order`, `notes`.
 
-Run the tests on the allocation: `srun --jobid=<job> --overlap -c 4 uv run pytest tests/benchmarks -q` (about 9 s).
+Run the tests on the allocation: `srun --jobid=<job> --overlap -c 4 uv run pytest tests/benchmarks -q` (about 10 s).
 
-Conventions: `Probe.h` holds physical values (h = 1/N, so N = 1/h must be an integer); levels are h0 / 2^level. `RunResult.cost` is the CPU time of the solve in seconds (`time.process_time`), not core-hours. `truth` takes unit inputs, with the v coordinate included for B3.
+Conventions: `Probe.h` holds physical values (h = 1/N, so N = 1/h must be an integer); levels are h0 / 2^level. `RunResult.cost` is deterministic work in work units (see Cost below), not CPU time. `truth` takes unit inputs, with the v coordinate included for B3.
 
 ## The problems
 
@@ -16,15 +16,31 @@ Conventions: `Probe.h` holds physical values (h = 1/N, so N = 1/h must be an int
 | B4 | `b4_sde` | theta [0.5, 3], sigma [0.2, 1.5], x0 [0.5, 2] | E[X_T^2], T = 1, Euler-Maruyama, 2000 paths | x0^2 e^{-2 theta T} + sigma^2 (1 - e^{-2 theta T})/(2 theta) | weak order 1.01 to 1.11 (levels 2-6, exact scheme expectation) | aleatoric noise that depends on the inputs (sd ratio of about 6 between two test points); replicates are seeds |
 | B5 | `b5_kink` | jump location [0.2, 0.8], frequency [1, 4], jump size [0.5, 2] | midpoint rule for sin(w x) + j H(x - a) | (1 - cos w)/w + j (1 - a) | none: error = j h xi(a/h) + O(h^2), xi in [-1/2, 1/2) | sign changes and non-monotone |error| as h halves (e.g. -8.6e-2, +6.2e-2, -1.9e-2, -1.9e-2, 2e-4 for one input) |
 | B6 | `b6_heat` | horizon T [0.02, 0.1], mode-3 weight [0, 1], mode-5 weight [0, 1] | u(1/2, T) of `u_t = u_xx`, central differences + backward Euler, dt = T h_t | e^{-pi^2 T} - a e^{-9 pi^2 T} + b e^{-25 pi^2 T} | 2.0 in dx (1.95, 1.99, 2.00); 1.0 in dt (0.96, 0.98, 0.99) | k = 2 independent resolution components |
-| B7 | `b7_thin_layer` | position [0.2, 0.8], amplitude [0.5, 2], width [3e-4, 9e-4] | outlet value of `u' = S(x)`, narrow Gaussian source, upwind | A w sqrt(pi/2) [erf + erf] | none; asymptotic range starts at level 7 to 9 | the trap: levels 0-4 return about 0 (or 1e-74 apart), the truth is 2e-3. Must not claim success |
+| B7 | `b7_thin_layer` | position [0.2, 0.8], amplitude [0.5, 2], width [3e-4, 9e-4] | outlet value of `u' = S(x)`, narrow Gaussian source, upwind | A w sqrt(pi/2) [erf + erf] | none; asymptotic range starts at level 8 (worst case over the region), 256 work units | the trap: levels 0-4 return about 0 (or 1e-74 apart), the truth is 2e-3. Must not claim success |
 
 Level l has h = h0 / 2^l with h0 = 1/4 (B1, B4, B5, B6 both components), 1/8 (B3, B7), 1/16 (B2).
 
-## Cost per level (CPU seconds, minimum of 3 runs, centre of the design region)
+## Cost: deterministic work
 
-Measured with `benchmarks/measure_costs.py` on 4 cores of node1808 (the solvers are single-threaded, so 3 cores idle). `gamma` is the fitted slope of log2(cost) over the last 5 levels (cost ~ 2^{gamma l}).
+`RunResult.cost` is `work(probe) * exp(sigma_c * N(0,1))`, in work units, with the normal draw seeded by (probe id, u, h, seed). `work` is the operation count of the discretisation, normalised so that the coarsest level of the problem costs 1 (so the coarsest run costs 1 work unit, level l costs 2^(gamma l) when every component is refined together). `sigma_c` is a class attribute (default 0.1; set it to 0 to switch the noise off and get the formula exactly). Measured CPU seconds are not the cost: use `BenchmarkProblem.measure_cpu(probe, seed)` for information. For microsecond 1-D solves CPU time is mostly call overhead and machine noise.
 
-| problem | l0 | l1 | l2 | l3 | l4 | l5 | l6 | l7 | l8 | l9 | gamma |
+| problem | work formula (N = 1/h cells) | gamma | work at level 4 / 6 / 8 |
+|---|---|---|---|
+| b1_poisson | N^3 (sparse LU of the N^2-unknown 5-point matrix, O(n^1.5) flops) | 3 | 4096 / 262144 / 1.7e7 |
+| b2_upwind | N (tridiagonal solve) | 1 | 16 / 64 / 256 |
+| b3_mixing | N cells x N time steps | 2 | 256 / 4096 / 65536 |
+| b4_sde | N time steps x 2000 paths | 1 | 16 / 64 / 256 |
+| b5_kink | N midpoint evaluations | 1 | 16 / 64 / 256 |
+| b6_heat | M cells x n steps (both refined together; 1 for each component alone) | 2 | 256 / 4096 / 65536 |
+| b7_thin_layer | N (bidiagonal solve) | 1 | 16 / 64 / 256 |
+
+**B7 and the budget.** Over the whole design region (checked on 40 positions at the narrowest, middle and widest source) every input is within 1% of the truth from level 8 on (`asymptotic_level = 8`, h = 1/2048), and some inputs are not at level 7. Level 8 costs 2^8 = 256 work units, against 1 for level 0. Levels 0 to 4 (cost 1 to 16 work units) return about 0 or a stray value that halves with h. So a budget that does not buy a level-8 run (about 256 work units, more with the lognormal noise) makes the trap real: the method can only see the misleading coarse levels. The measured CPU seconds of a level-8 run are about 3e-4 s; that number is why CPU time cannot be the cost here.
+
+### Measured CPU seconds (information only)
+
+Minimum of 3 runs at the centre of each design region, from `benchmarks/measure_costs.py`, on 4 cores of node1808 (the solvers are single-threaded). The last column is the fitted slope over the last 5 levels. It differs from the work gamma because of call and Python-loop overhead.
+
+| problem | l0 | l1 | l2 | l3 | l4 | l5 | l6 | l7 | l8 | l9 | slope |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | b1_poisson | 1.2e-03 | 1.4e-03 | 1.9e-03 | 3.7e-03 | 1.4e-02 | 6.7e-02 | 3.5e-01 | 2.3e+00 | | | 2.32 |
 | b2_upwind | 6.2e-05 | 5.1e-05 | 4.9e-05 | 5.1e-05 | 5.7e-05 | 6.0e-05 | 7.4e-05 | 9.8e-05 | 1.6e-04 | 2.6e-04 | 0.53 |
@@ -33,11 +49,6 @@ Measured with `benchmarks/measure_costs.py` on 4 cores of node1808 (the solvers 
 | b5_kink | 1.9e-05 | 1.6e-05 | 1.6e-05 | 1.7e-05 | 1.6e-05 | 1.7e-05 | 1.9e-05 | 2.5e-05 | 3.1e-05 | 4.7e-05 | 0.36 |
 | b6_heat | 4.6e-04 | 4.8e-04 | 5.5e-04 | 6.5e-04 | 9.0e-04 | 1.5e-03 | 3.3e-03 | 8.9e-03 | 2.8e-02 | | 1.25 |
 | b7_thin_layer | 6.6e-05 | 5.9e-05 | 5.7e-05 | 6.2e-05 | 5.7e-05 | 8.2e-05 | 1.1e-04 | 1.6e-04 | 2.7e-04 | 4.8e-04 | 0.64 |
-
-Caveats on cost:
-- The costs are small. The target of "about 1 ms at the coarsest level, up to 30 s at level 6-7" is met only by B1 (1 ms to 2.3 s at level 7). B3 and B6 start near 1 ms but reach only 0.1 s. B2, B5, B7 are 1D and cost microseconds; their cost is dominated by call overhead, so gamma over the first levels is below its asymptotic value (1). The tests use deeper levels (10-17) for B5 and B7, where gamma is 0.94 and 1.01.
-- B3 and B6 have a Python loop over time steps, so gamma is about 1 (loop overhead) at small N and tends to 2 (steps x cells) at large N.
-- B1 is the only problem with a cost that grows faster than 2^2 (sparse direct solve, about 2^2.3 here, 2^3 asymptotically).
 
 ## Notes per problem
 

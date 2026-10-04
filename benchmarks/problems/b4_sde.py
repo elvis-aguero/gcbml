@@ -3,14 +3,16 @@ r"""B4: Euler-Maruyama for an Ornstein-Uhlenbeck SDE, with Monte-Carlo noise (he
 SDE: dX = -theta X dt + sigma dW, X(0) = x0, horizon T = 1. QoI: E[X_T^2]. Inputs (theta, sigma, x0).
 
 Truth. X_T is Gaussian with mean m = x0 e^{-theta T} and variance v = sigma^2 (1 - e^{-2 theta T}) / (2 theta)
-(Ito isometry, Gardiner, Handbook of Stochastic Methods, Sec. 4.4.4), so
+(standard result: Ito isometry; see Gardiner, Handbook of Stochastic Methods; a test checks it
+against the limit of the scheme), so
 
     E[X_T^2] = m^2 + v = x0^2 e^{-2 theta T} + sigma^2 (1 - e^{-2 theta T}) / (2 theta).
 
 Scheme. X_{k+1} = (1 - theta h) X_k + sigma sqrt(h) Z_k, n = T/h steps (h = 1/(4 * 2^level)). It is
 linear, so X_n is Gaussian too with m_h = x0 (1 - theta h)^n and v_h obeying v_{k+1} = (1 - theta h)^2 v_k
 + sigma^2 h, v_0 = 0. The exact expectation of the scheme is m_h^2 + v_h, which differs from the truth at
-first order in h: weak order 1 (Kloeden and Platen, Numerical Solution of SDEs, Thm 14.1.5).
+first order in h: weak order 1 (standard result, see Kloeden and Platen, Numerical Solution of SDEs;
+a test measures it).
 ``discrete_expectation`` returns it, so the order is tested without Monte-Carlo noise.
 
 A run averages X_T^2 over N = 2000 paths, so y = m_h^2 + v_h + noise. For a Gaussian X_T,
@@ -22,8 +24,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from benchmarks.base import BenchmarkProblem, Timer, geometric_levels, grid_cells, make_problem
-from gcbml.data import Probe, RunResult
+from benchmarks.base import BenchmarkProblem, geometric_levels, grid_cells, make_problem
+from gcbml.data import Probe
 from gcbml.problem import Problem, ResolutionComponent
 
 T_HORIZON = 1.0
@@ -38,7 +40,7 @@ def exact_second_moment(theta: float, sigma: float, x0: float) -> float:
 class OrnsteinUhlenbeckEM(BenchmarkProblem):
     name = "b4_sde"
     expected_order = 1.0
-    cost_gamma_range = (0.5, 1.6)
+    work_gamma = 1.0
     notes = (
         "Euler-Maruyama for an OU process, QoI E[X_T^2] from 2000 paths. Weak order 1; the run-to-run sd "
         "is large and depends on the inputs (heteroscedastic); replicates are seeds. Cost is linear in "
@@ -76,18 +78,21 @@ class OrnsteinUhlenbeckEM(BenchmarkProblem):
         m, v = self._moments(x, h)
         return float(np.sqrt((2.0 * v * v + 4.0 * m * m * v) / self.n_paths))
 
-    def run(self, probe: Probe, seed: int) -> RunResult:
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
         theta, sigma, x0 = probe.u
         h = probe.h[0]
         n = grid_cells(h / T_HORIZON)
         rng = np.random.default_rng(np.random.SeedSequence([seed, n]))
-        with Timer() as t:
-            x = np.full(self.n_paths, x0)
-            amp = sigma * np.sqrt(h)
-            for _ in range(n):
-                x = (1.0 - theta * h) * x + amp * rng.standard_normal(self.n_paths)
-            y = float(np.mean(x * x))
-        return self._result(probe, y, t.elapsed)
+        x = np.full(self.n_paths, x0)
+        amp = sigma * np.sqrt(h)
+        for _ in range(n):
+            x = (1.0 - theta * h) * x + amp * rng.standard_normal(self.n_paths)
+        y = float(np.mean(x * x))
+        return np.array([y]), None
+
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Work = n steps x a fixed number of paths."""
+        return float(grid_cells(h[0]))
 
     def truth(self, x_unit: np.ndarray) -> np.ndarray:
         x = self.problem().inputs.from_unit(np.atleast_2d(x_unit))

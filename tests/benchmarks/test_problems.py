@@ -261,29 +261,62 @@ def test_truth_b6_matches_a_very_fine_run():
 
 # ---------------------------------------------------------------- cost growth
 
-COST_LEVELS = {
-    "b1_poisson": (3, 6),
-    "b2_upwind": (4, 7),
-    "b3_mixing": (3, 7),
-    "b4_sde": (2, 6),
-    "b5_kink": (10, 17),
-    "b6_heat": (3, 7),
-    "b7_thin_layer": (10, 17),
+WORK_GAMMA = {
+    "b1_poisson": 3.0,
+    "b2_upwind": 1.0,
+    "b3_mixing": 2.0,
+    "b4_sde": 1.0,
+    "b5_kink": 1.0,
+    "b6_heat": 2.0,
+    "b7_thin_layer": 1.0,
 }
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_cost_grows_roughly_exponentially_with_level(name, capsys):
+def test_cost_is_the_documented_work_formula_when_noise_is_off(name):
     bp = make(name)
+    bp.sigma_c = 0.0
+    assert bp.work_gamma == WORK_GAMMA[name]
     z = random_unit_inputs(bp, 1, 9)[0]
-    lo, hi = COST_LEVELS[name]
-    levels = np.arange(lo, hi + 1)
-    cost = []
-    for lev in levels:
-        cost.append(min(bp.run(probe_at(bp, z, int(lev)), seed=0).cost for _ in range(3)))
-    gamma = np.polyfit(levels, np.log2(cost), 1)[0]
-    with capsys.disabled():
-        msg = f"gamma = {gamma:.2f}, {cost[0]:.2e} s at level {lo}, {cost[-1]:.2e} s at level {hi}"
-        print(f"\n[cost] {name}: {msg}")
-    assert bp.cost_gamma_range[0] <= gamma <= bp.cost_gamma_range[1]
-    assert cost[-1] > cost[0]
+    levels = np.arange(0, 6)
+    cost = np.array([bp.run(probe_at(bp, z, int(lev)), seed=0).cost for lev in levels])
+    assert cost[0] == pytest.approx(1.0)  # the coarsest level costs 1 work unit
+    assert np.polyfit(levels, np.log2(cost), 1)[0] == pytest.approx(WORK_GAMMA[name], abs=1e-9)
+    assert np.allclose(cost, 2.0 ** (WORK_GAMMA[name] * levels))
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_cost_noise_is_lognormal_and_deterministic_given_the_seed(name):
+    bp = make(name)
+    assert bp.sigma_c == 0.1
+    probe = probe_at(bp, random_unit_inputs(bp, 1, 2)[0], 1)
+    w = 2.0**bp.work_gamma
+    c = np.array([bp.run(probe, seed=s).cost for s in range(400)])
+    assert bp.run(probe, seed=5).cost == bp.run(probe, seed=5).cost
+    logr = np.log(c / w)
+    assert abs(logr.mean()) < 4 * 0.1 / np.sqrt(len(c))
+    assert logr.std(ddof=1) == pytest.approx(0.1, rel=0.2)
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_measure_cpu_reports_positive_seconds(name):
+    bp = make(name)
+    probe = probe_at(bp, random_unit_inputs(bp, 1, 2)[0], 1)
+    assert bp.measure_cpu(probe, seed=0) > 0
+
+
+def test_b7_asymptotic_level_and_its_work_cost_are_documented_correctly():
+    bp = make("b7_thin_layer")
+    p = bp.problem()
+    lev = bp.asymptotic_level
+    bp.sigma_c = 0.0
+    assert bp.run(probe_at(bp, np.full(3, 0.5), lev), 0).cost == 2.0**lev
+    # from `lev` on every input is within 1% of the truth; one level earlier some input is not (worst case)
+    pos = np.random.default_rng(0).uniform(0.05, 0.95, 40)
+    zs = [np.array([a, 0.5, w]) for a in pos for w in (0.0, 0.5, 1.0)]
+    rel = np.array(
+        [values_at_levels(bp, z, [lev - 1, lev])[:, 0] / bp.truth_for_controls(z)[0] - 1 for z in zs]
+    )
+    assert np.all(np.abs(rel[:, 1]) < 0.01)
+    assert np.any(np.abs(rel[:, 0]) > 0.01)
+    assert p.resolution.components[0].level_value(lev) < 9e-4  # resolution comparable to the narrowest layer

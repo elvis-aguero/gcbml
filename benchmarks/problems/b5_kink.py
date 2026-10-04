@@ -21,15 +21,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from benchmarks.base import BenchmarkProblem, Timer, geometric_levels, grid_cells, make_problem
-from gcbml.data import Probe, RunResult
+from benchmarks.base import BenchmarkProblem, geometric_levels, grid_cells, make_problem
+from gcbml.data import Probe
 from gcbml.problem import Problem, ResolutionComponent
 
 
 class MidpointOnJump(BenchmarkProblem):
     name = "b5_kink"
     expected_order = None
-    cost_gamma_range = (0.5, 1.6)
+    work_gamma = 1.0
     notes = (
         "Midpoint rule on sin(w x) + j H(x - a). The error is j h xi(a/h), with xi in [-1/2, 1/2) set by "
         "the binary digits of a: it changes sign and is not monotone as h halves. No convergence order "
@@ -45,13 +45,16 @@ class MidpointOnJump(BenchmarkProblem):
             [ResolutionComponent("h", geometric_levels(1 / 4))],
         )
 
-    def run(self, probe: Probe, seed: int) -> RunResult:
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
         a, w, j = probe.u
         n = grid_cells(probe.h[0])
-        with Timer() as t:
-            mid = (np.arange(n) + 0.5) / n
-            q = float(np.mean(np.sin(w * mid) + j * (mid > a)))
-        return self._result(probe, q, t.elapsed)
+        mid = (np.arange(n) + 0.5) / n
+        q = float(np.mean(np.sin(w * mid) + j * (mid > a)))
+        return np.array([q]), None
+
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Work = N midpoint evaluations."""
+        return float(grid_cells(h[0]))
 
     def truth(self, x_unit: np.ndarray) -> np.ndarray:
         a, w, j = self.problem().inputs.from_unit(np.atleast_2d(x_unit)).T

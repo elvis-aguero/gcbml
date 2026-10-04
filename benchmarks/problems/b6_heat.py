@@ -24,8 +24,8 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from benchmarks.base import BenchmarkProblem, Timer, geometric_levels, grid_cells, make_problem
-from gcbml.data import Probe, RunResult
+from benchmarks.base import BenchmarkProblem, geometric_levels, grid_cells, make_problem
+from gcbml.data import Probe
 from gcbml.problem import Problem, ResolutionComponent
 
 
@@ -33,7 +33,7 @@ class HeatTwoResolutions(BenchmarkProblem):
     name = "b6_heat"
     expected_order = 1.0  # the lower of the two; per component see expected_orders
     n_resolution = 2
-    cost_gamma_range = (0.8, 3.0)
+    work_gamma = 2.0
     notes = (
         "Heat equation, central differences in space (order 2 in dx) and backward Euler in time (order 1 "
         "in dt = T h_t). Two independent resolution components, h = (dx, h_t). QoI u(1/2, T)."
@@ -55,12 +55,15 @@ class HeatTwoResolutions(BenchmarkProblem):
             ],
         )
 
-    def run(self, probe: Probe, seed: int) -> RunResult:
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
         horizon, a, b = probe.u
         m, n = grid_cells(probe.h[0]), grid_cells(probe.h[1])
-        with Timer() as t:
-            y = _solve(horizon, a, b, m, n)
-        return self._result(probe, y, t.elapsed)
+        y = _solve(horizon, a, b, m, n)
+        return np.array([y]), None
+
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Work = M cells x n time steps (gamma 2 refining both components, 1 for each alone)."""
+        return float(grid_cells(h[0]) * grid_cells(h[1]))
 
     def truth(self, x_unit: np.ndarray) -> np.ndarray:
         t, a, b = self.problem().inputs.from_unit(np.atleast_2d(x_unit)).T

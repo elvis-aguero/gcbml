@@ -23,8 +23,8 @@ from __future__ import annotations
 import numpy as np
 from scipy.linalg import solve_banded
 
-from benchmarks.base import BenchmarkProblem, Timer, geometric_levels, grid_cells, make_problem
-from gcbml.data import Probe, RunResult
+from benchmarks.base import BenchmarkProblem, geometric_levels, grid_cells, make_problem
+from gcbml.data import Probe
 from gcbml.problem import Problem, ResolutionComponent
 
 X_Q = 15.0 / 16.0
@@ -38,7 +38,7 @@ def exact_u(x: float, pe: float, s: float, g: float) -> float:
 class UpwindBoundaryLayer(BenchmarkProblem):
     name = "b2_upwind"
     expected_order = 1.0
-    cost_gamma_range = (0.0, 2.0)
+    work_gamma = 1.0
     notes = (
         "Upwind advection-diffusion with an outlet boundary layer. Order 1 once the cell Peclet number "
         "h*Pe is small; pre-asymptotic on coarse grids at high Pe. Cost is tiny (tridiagonal solve): "
@@ -54,12 +54,15 @@ class UpwindBoundaryLayer(BenchmarkProblem):
             [ResolutionComponent("h", geometric_levels(1 / 16))],
         )
 
-    def run(self, probe: Probe, seed: int) -> RunResult:
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
         pe, s, g = probe.u
         n = grid_cells(probe.h[0])
-        with Timer() as t:
-            u_q = _solve(pe, s, g, n)
-        return self._result(probe, u_q, t.elapsed)
+        u_q = _solve(pe, s, g, n)
+        return np.array([u_q]), None
+
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Work = N: tridiagonal solve."""
+        return float(grid_cells(h[0]))
 
     def truth(self, x_unit: np.ndarray) -> np.ndarray:
         x = self.problem().inputs.from_unit(np.atleast_2d(x_unit))

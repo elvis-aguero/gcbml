@@ -22,8 +22,8 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from benchmarks.base import BenchmarkProblem, Timer, geometric_levels, grid_cells, make_problem
-from gcbml.data import Probe, RunResult
+from benchmarks.base import BenchmarkProblem, geometric_levels, grid_cells, make_problem
+from gcbml.data import Probe
 from gcbml.problem import Problem, ResolutionComponent
 
 
@@ -34,7 +34,7 @@ def exact_integral(amp: float, w: float) -> float:
 class Poisson2D(BenchmarkProblem):
     name = "b1_poisson"
     expected_order = 2.0
-    cost_gamma_range = (2.0, 4.0)
+    work_gamma = 3.0
     notes = (
         "Anisotropic Poisson, manufactured exponential solution, 5-point stencil with a sparse LU solve. "
         "QoI is the trapezoid integral of the solution. Clean second order; cost per halving of h is "
@@ -50,12 +50,15 @@ class Poisson2D(BenchmarkProblem):
             [ResolutionComponent("h", geometric_levels(1 / 4))],
         )
 
-    def run(self, probe: Probe, seed: int) -> RunResult:
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
         amp, w, kap = probe.u
         n = grid_cells(probe.h[0])
-        with Timer() as t:
-            q = _solve(amp, w, kap, n)
-        return self._result(probe, q, t.elapsed)
+        q = _solve(amp, w, kap, n)
+        return np.array([q]), None
+
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Work = N^3: sparse LU of the 5-point matrix (n = N^2 unknowns, O(n^1.5) flops)."""
+        return float(grid_cells(h[0]) ** 3)
 
     def truth(self, x_unit: np.ndarray) -> np.ndarray:
         x = self.problem().inputs.from_unit(np.atleast_2d(x_unit))

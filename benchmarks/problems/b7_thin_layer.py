@@ -23,15 +23,16 @@ import numpy as np
 from scipy.linalg import solve_banded
 from scipy.special import erf
 
-from benchmarks.base import BenchmarkProblem, Timer, geometric_levels, grid_cells, make_problem
-from gcbml.data import Probe, RunResult
+from benchmarks.base import BenchmarkProblem, geometric_levels, grid_cells, make_problem
+from gcbml.data import Probe
 from gcbml.problem import Problem, ResolutionComponent
 
 
 class ThinLayerTrap(BenchmarkProblem):
     name = "b7_thin_layer"
     expected_order = None
-    cost_gamma_range = (0.5, 1.6)
+    work_gamma = 1.0
+    asymptotic_level = 8  # worst case over the region: every input is within 1% of truth from here on
     notes = (
         "TRAP. Upwind advection with a Gaussian source of width ~5e-4. Levels 0-5 miss the source and "
         "agree with each other near zero; the asymptotic (spectral) range begins at level ~7-9. "
@@ -47,19 +48,22 @@ class ThinLayerTrap(BenchmarkProblem):
             [ResolutionComponent("h", geometric_levels(1 / 8))],
         )
 
-    def run(self, probe: Probe, seed: int) -> RunResult:
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
         a, amp, w = probe.u
         n = grid_cells(probe.h[0])
-        with Timer() as t:
-            h = 1.0 / n
-            xs = np.arange(1, n + 1) * h
-            src = amp * np.exp(-((xs - a) ** 2) / (2 * w * w))
-            ab = np.zeros((2, n))
-            ab[0, :] = 1.0 / h
-            ab[1, :-1] = -1.0 / h
-            u = solve_banded((1, 0), ab, src)
-            y = float(u[-1])
-        return self._result(probe, y, t.elapsed)
+        h = 1.0 / n
+        xs = np.arange(1, n + 1) * h
+        src = amp * np.exp(-((xs - a) ** 2) / (2 * w * w))
+        ab = np.zeros((2, n))
+        ab[0, :] = 1.0 / h
+        ab[1, :-1] = -1.0 / h
+        u = solve_banded((1, 0), ab, src)
+        y = float(u[-1])
+        return np.array([y]), None
+
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Work = N: bidiagonal solve."""
+        return float(grid_cells(h[0]))
 
     def truth(self, x_unit: np.ndarray) -> np.ndarray:
         a, amp, w = self.problem().inputs.from_unit(np.atleast_2d(x_unit)).T

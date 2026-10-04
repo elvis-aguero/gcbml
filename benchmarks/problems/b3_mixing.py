@@ -33,8 +33,8 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 from scipy.optimize import brentq
 
-from benchmarks.base import BenchmarkProblem, Timer, geometric_levels, grid_cells, make_problem
-from gcbml.data import Probe, RunResult
+from benchmarks.base import BenchmarkProblem, geometric_levels, grid_cells, make_problem
+from gcbml.data import Probe
 from gcbml.problem import Problem, ResolutionComponent
 
 T_FINAL = 0.2
@@ -56,7 +56,7 @@ class MixingTime(BenchmarkProblem):
     name = "b3_mixing"
     expected_order = 1.0
     n_outputs = len(V_LEVELS)
-    cost_gamma_range = (0.8, 3.0)
+    work_gamma = 2.0
     t_final = T_FINAL
     notes = (
         "Time to reach mixing degree chi in {0.5, 0.75, 0.9, 0.95} for 1-D diffusion of two segregated "
@@ -77,12 +77,15 @@ class MixingTime(BenchmarkProblem):
         u = np.asarray(u, float)
         return np.column_stack([np.tile(u, (len(V_LEVELS), 1)), np.asarray(V_LEVELS)])
 
-    def run(self, probe: Probe, seed: int) -> RunResult:
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
         d, l0 = probe.u
         n = grid_cells(probe.h[0])
-        with Timer() as t:
-            y, cens = _solve(d, l0, n)
-        return self._result(probe, y, t.elapsed, cens)
+        y, cens = _solve(d, l0, n)
+        return y, cens
+
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Work = N cells x N time steps."""
+        return float(grid_cells(h[0]) ** 2)
 
     def truth(self, x_unit: np.ndarray) -> np.ndarray:
         x = self.problem().inputs.from_unit(np.atleast_2d(x_unit))

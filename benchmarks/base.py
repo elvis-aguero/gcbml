@@ -6,8 +6,11 @@ discretisation, together with the converged answer (h -> 0) known in closed form
 Conventions shared by every problem:
 - ``Probe.u`` holds the physical control values, ``Probe.h`` the physical resolution values (for
   example a cell size 1/N). The solver maps h to a grid by rounding 1/h to an integer.
-- ``RunResult.cost`` is the CPU time of the solve in seconds (``time.process_time``). The field is
-  documented as core-hours in gcbml; the benchmarks report seconds, as the problems are tiny.
+- ``RunResult.cost`` is deterministic work, not CPU time: ``work(probe) * exp(sigma_c * N(0,1))``, with
+  ``work`` the documented operation count of the discretisation normalised so that the coarsest level
+  costs 1 work unit, and the normal draw seeded by (probe, seed). ``sigma_c`` is a class attribute
+  (0.1 by default, 0 disables the noise). Measured CPU seconds (``time.process_time``) are available
+  for information through ``measure_cpu``; they are dominated by call overhead for the 1-D problems.
 - ``truth`` takes unit inputs of shape (n, d) (output coordinates v included for S1 problems) and
   returns the converged value for each row, shape (n,).
 """
@@ -15,6 +18,7 @@ Conventions shared by every problem:
 from __future__ import annotations
 
 import time
+import zlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 
@@ -79,7 +83,8 @@ class BenchmarkProblem(ABC):
     notes: str
     n_resolution: int = 1  # k, number of resolution components
     n_outputs: int = 1  # outputs per run (> 1 for S1 problems)
-    cost_gamma_range: tuple[float, float] = (0.0, 4.0)
+    work_gamma: float  # work grows as 2^(work_gamma * level) when every resolution component is refined
+    sigma_c: float = 0.1  # sd of the log of the multiplicative cost noise; 0 disables it
 
     @property
     def expected_orders(self) -> tuple[float, ...] | None:
@@ -90,7 +95,36 @@ class BenchmarkProblem(ABC):
     def problem(self) -> Problem: ...
 
     @abstractmethod
-    def run(self, probe: Probe, seed: int) -> RunResult: ...
+    def _solve(self, probe: Probe, seed: int) -> tuple[np.ndarray, np.ndarray | None]:
+        """Run the discretisation; return the outputs and the censoring flags (or None)."""
+
+    @abstractmethod
+    def _work_raw(self, h: tuple[float, ...]) -> float:
+        """Operation count (up to a constant) of one run at resolution h."""
+
+    def work(self, probe: Probe) -> float:
+        """Documented work of a run, in work units: the coarsest level of the problem costs 1."""
+        h_c = tuple(c.h_c for c in self.problem().resolution.components)
+        return self._work_raw(tuple(probe.h)) / self._work_raw(h_c)
+
+    def cost(self, probe: Probe, seed: int) -> float:
+        """work(probe) * exp(sigma_c * N(0,1)), the normal seeded by (probe, seed)."""
+        w = self.work(probe)
+        if self.sigma_c == 0:
+            return w
+        key = zlib.crc32(repr((probe.probe_id, probe.u, probe.h)).encode())
+        z = np.random.default_rng(np.random.SeedSequence([seed, key])).standard_normal()
+        return float(w * np.exp(self.sigma_c * z))
+
+    def run(self, probe: Probe, seed: int) -> RunResult:
+        y, cens = self._solve(probe, seed)
+        return self._result(probe, y, self.cost(probe, seed), cens)
+
+    def measure_cpu(self, probe: Probe, seed: int) -> float:
+        """CPU seconds of the solve (information only; not the cost the budget is set against)."""
+        with Timer() as t:
+            self._solve(probe, seed)
+        return t.elapsed
 
     @abstractmethod
     def truth(self, x_unit: np.ndarray) -> np.ndarray: ...
