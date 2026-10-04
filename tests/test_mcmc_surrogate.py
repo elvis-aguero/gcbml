@@ -69,6 +69,8 @@ def make_model(x, y, s):
 
 
 def run_chain(x, y, s, n_iter, key, n_ess=5, width=1.0):
+    # start f from an exact draw of f | theta0, y: starting at f = y is 10 nats above the typical set
+    # in the strong-data regime and takes thousands of iterations to relax
     prior_cov, loglik, log_prior, surr = make_model(x, y, s)
     w = jnp.full(2, width)
 
@@ -81,8 +83,19 @@ def run_chain(x, y, s, n_iter, key, n_ess=5, width=1.0):
             f, _ = ess_step(kk, f, chol, loglik)
         return (theta, f), theta
 
-    _, thetas = jax.lax.scan(body, (jnp.asarray(PRIOR_MEAN), jnp.asarray(y)), jax.random.split(key, n_iter))
+    k0, key = jax.random.split(key)
+    mu, Lc, _ = f_conditional_jax(prior_cov(jnp.asarray(PRIOR_MEAN)), s, jnp.asarray(y))
+    f0 = mu + Lc @ jax.random.normal(k0, (N_PTS,))
+    _, thetas = jax.lax.scan(body, (jnp.asarray(PRIOR_MEAN), f0), jax.random.split(key, n_iter))
     return thetas
+
+
+def f_conditional_jax(Sg, s, y):
+    A = Sg + s**2 * jnp.eye(N_PTS)
+    mu = Sg @ jnp.linalg.solve(A, y)
+    C = Sg - Sg @ jnp.linalg.solve(A, Sg)
+    C = 0.5 * (C + C.T) + 1e-12 * jnp.eye(N_PTS)
+    return mu, jnp.linalg.cholesky(C), None
 
 
 def grid_sample(x, y, s, n_draws, seed, n=140):
@@ -129,7 +142,7 @@ def f_conditional(theta, x, y, s, rng=None):
 
 @pytest.mark.parametrize("s,seed", [(0.3, 1), (0.02, 2)])
 def test_one_step_leaves_joint_posterior_invariant(s, seed):
-    """Start from exact posterior draws of (theta, f); one step must keep theta ~ grid marginal and f | theta."""
+    """From exact posterior draws of (theta, f), one step keeps theta ~ grid marginal and f | theta."""
     n_draws = 1500
     x, y = make_data(s, seed=seed)
     a, b, p, th0, f0 = grid_sample(x, y, s, n_draws, seed=seed)
@@ -159,7 +172,7 @@ def test_one_step_leaves_joint_posterior_invariant(s, seed):
 def test_hyperparameter_posterior_matches_grid(s, seed):
     x, y = make_data(s, seed=seed)
     mean, var = grid_posterior(x, y, s)
-    n_chains, n_iter, burn = 8, 6000, 300
+    n_chains, n_iter, burn = 8, 6000, 1000
     keys = jax.random.split(jax.random.key(20 + seed), n_chains)
     th = np.asarray(jax.jit(jax.vmap(lambda k: run_chain(x, y, s, n_iter, k)))(keys))[
         :, burn:
