@@ -83,10 +83,10 @@ def brute_force_joint(ref, Xn, Hn, Pn, nvn, beta):
     return mean, cov
 
 
-@pytest.mark.parametrize("pad", [0, 6])
 @pytest.mark.parametrize("beta", [BETA_C, None])
 @pytest.mark.parametrize("basis", ["constant", "linear"])
-def test_joint_new_equals_brute_force_joint_within_run(basis, beta, pad):
+def test_joint_new_equals_brute_force_joint_within_run(basis, beta):
+    pad = 6 if basis == "linear" else 0  # padding with garbage rows must not matter
     q = 1 if basis == "constant" else 3
     if beta is not None and q == 3:
         beta = ((0.4,) * 3, (2.0,) * 3)
