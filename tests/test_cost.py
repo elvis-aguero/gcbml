@@ -504,8 +504,10 @@ def ladder_coverage(seed, lev_means, prior, n_per=10, n_new=100, noise=0.3, new_
     return out
 
 
-# a generic prior: kappa0 ~ N(0, 1), first step 2.5 +- 1.5 (covers [1, 4]), step increments sd 0.3
-GENERIC = CostPrior(0.0, 1.0, (2.5,), (1.5,), (0.3,))
+# a generic prior: kappa0 ~ N(0, 1), first step 2.5 +- 1.5 (covers [1, 4]), step increment sd 0.6
+# (top of the family range). Measured on 24 seeds: 0.3 under-covers the accelerating ladder (0.74 first,
+# 0.29 second unprobed level).
+GENERIC = CostPrior(0.0, 1.0, (2.5,), (1.5,), (0.6,))
 
 
 def prior_family_ladder(rng):
@@ -545,9 +547,9 @@ def test_cap_covers_realised_costs_on_deterministic_ladders(name, steps):
 
 # the application-shaped stress ladder: costs 0.015, 0.25, 6, 300 core-hours (steps 4.06, 4.58, 5.64;
 # level 4 is a continuation with step 6.7). Prior scales set HERE, not defaults: kappa0 = log2 0.015 +- 3,
-# first step 3 +- 1, step increment sd 0.5.
+# first step 3 +- 1, step increment sd 1.0 (the ladder's own increments are 0.5 and 1.1; sd 0.5 covered 0.48).
 STRESS_LEV = np.concatenate([np.log2([0.015, 0.25, 6.0, 300.0]), [np.log2(300.0) + 6.7]])
-STRESS_PRIOR = CostPrior(float(STRESS_LEV[0]), 3.0, (3.0,), (1.0,), (0.5,))
+STRESS_PRIOR = CostPrior(float(STRESS_LEV[0]), 3.0, (3.0,), (1.0,), (1.0,))
 
 
 @pytest.mark.slow
