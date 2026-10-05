@@ -33,8 +33,9 @@ def run_seed(seed: int, probe_id: str) -> int:
 class BenchmarkOracle:
     """Results are immediate: ``submit`` computes them, ``poll`` hands them over."""
 
-    def __init__(self, bp: BenchmarkProblem, seed: int = 0, quote_work: bool = False):
+    def __init__(self, bp: BenchmarkProblem, seed: int = 0, quote_work: bool = False, y_scale: float = 1.0):
         self.bp = bp
+        self.y_scale = float(y_scale)  # outputs are y / y_scale (a choice of units, benchmarks/config.py)
         self.seed = int(seed)
         self.quote_work = quote_work
         self._done: list[RunResult] = []
@@ -56,9 +57,14 @@ class BenchmarkOracle:
             return RunResult(probe, np.zeros((0, d)), np.zeros(0), np.zeros(0, bool), float(cap), True)
         r = self.bp.run(probe, s)
         return RunResult(
-            probe=probe, x=r.x, y=r.y, censored=r.censored, cost=float(c), cost_censored=False,
+            probe=probe,
+            x=r.x,
+            y=r.y / self.y_scale,
+            censored=r.censored,
+            cost=float(c),
+            cost_censored=False,
             cost_hint=None if not self.quote_work else float(self.bp.work(probe)),
-        )  # fmt: skip
+        )
 
     def submit(self, probes: Sequence[Probe], caps: Sequence[float]) -> None:
         for probe, cap in zip(probes, caps, strict=True):

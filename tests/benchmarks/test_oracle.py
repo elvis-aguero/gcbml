@@ -68,3 +68,11 @@ def test_quote_is_none_unless_asked():
     pr = probe(bp)
     assert BenchmarkOracle(bp).quote([pr]) == [None]
     assert BenchmarkOracle(bp, quote_work=True).quote([pr]) == [bp.work(pr)]
+
+
+def test_y_scale_is_a_choice_of_units():
+    bp = ALL_PROBLEMS["b2_upwind"]()
+    pr = probe(bp, "x", level=3)
+    a = BenchmarkOracle(bp, seed=1).run(pr)
+    b = BenchmarkOracle(bp, seed=1, y_scale=2.0).run(pr)
+    assert np.allclose(b.y, a.y / 2.0) and b.cost == a.cost
