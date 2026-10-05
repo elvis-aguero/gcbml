@@ -682,27 +682,10 @@ class Campaign:
         self._cache = an
         return an
 
-    _last_n_pad: int = -1
-
-    def _release_compiled(self, n_pad: int) -> None:
-        """Drop compiled programs of the previous data size once the padded size grows.
-
-        A long campaign compiles the sampler, the predictors and the acquisition for every bucket size; the
-        executables of the old sizes are never used again, and their mapped code sections exhausted the
-        process ("LLVM ERROR: Unable to allocate section memory!", seen in the end-to-end test). The
-        persistent compilation cache makes a later hit cheap. [assumption: glue in campaign, not in inference]
-        """
-        if n_pad != self._last_n_pad and self._last_n_pad > 0:
-            jax.clear_caches()
-            inference._TEMPLATES.clear()
-            inference._runner.cache_clear()
-        self._last_n_pad = n_pad
-
     def _analyse_once(self, reuse: list | None) -> _Analysis:
         data, levels = self._build_data()
         if int(np.sum(data.mask)) < MIN_ROWS:
             raise ValueError("too few output rows to fit")
-        self._release_compiled(int(data.X.shape[0]))
         Xs = self.problem.sigma_n
         key = self._fit_key(0)
         skipped: list[str] = []
