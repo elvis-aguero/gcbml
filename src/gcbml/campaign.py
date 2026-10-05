@@ -17,8 +17,10 @@ Step 2: fit every structure (inference.fit) on all data; stacking weights (stack
   finest-level hold-out when testable, else equal weights. Structures = product of settings.h_kernels and
   problem.transforms (levels: all) [v1].
 Step 3: gates G0-G4, G6, G7 (gates.py; G5 when settings.monotone is set). Repair (spec): at most 2 cycles:
-  remove the coarsest level on a G4 fail; on other fails, label the result "uncalibrated" (never silently
-  calibrated). Gate results go in the report.
+  remove the coarsest level on a G4 fail (only while at least 3 levels remain); buy one probe a level finer
+  than any run so far where |z| of a failed G1/G2 is largest; on other fails, label the result
+  "uncalibrated" (never silently calibrated). G6 is a warning in the notes, never a blocking gate.
+  Gate results go in the report.
 Step 4: success if max over Sigma_N of sigma_epi / eps <= 1 and the gates pass -> ask() returns [];
   if the spent cost plus the cheapest admissible cap exceeds the budget -> P2 report, ask() returns [];
   else forecast (forecast.py): if infeasible switch the acquisition to mode "softmax" (P2) and record it;
@@ -53,12 +55,10 @@ Implementation notes and assumptions (each marked [assumption] is a choice the s
   * G2 uses the highest-weight structure, at most 32 draws and 20 runs; G3 the same structure's posterior
     noise variance; G0 and G7 pool the draws of all structures by their weights. G7 cannot refit: a scenario
     with ESS < 400 is "not testable" (gates.g7_prior), so with few draws G7 is mostly "not testable".
-  * Candidate noise variance (acquisition.Candidate.noise_var is one array for all structures) is the median
-    over the draws of exp(m_s + b_s . hbar) of the highest-weight structure, in ITS Lambda units. Mixed
-    transforms therefore see a wrong noise scale in the structures other than that one (reported).
+  * Noise variance of new rows is per structure (StructurePosterior.noise_var): exp(m_s + b_s . hbar) of each
+    kept draw of that structure, in ITS Lambda units (the latent field zeta stays at its mean).
   * The Step 4 forecast switches the acquisition to "softmax" whenever it does not reach P1 within the
     remaining budget (infeasible or budget-bound), and back to "hinge" when a later forecast succeeds.
-  * Repair covers the coarsest-level removal only; "buy a finer probe where |z| is largest" is not done.
 
 State layout in state_dir: state.json (problem, scales, cost prior, settings, counters, pending probes and
 caps, RNG key, mode, status, history, result metadata) and results.npz (x_i, y_i, censored_i per result).
@@ -99,6 +99,7 @@ FID_MAX_DRAWS = 32
 MAX_REPAIR = 2
 MIN_SITES_HOLDOUT = 12  # two halves of >= 6 held-out sites (spec 2.7)
 CAP_QUANTILE = 0.95
+PRICE_PAD = 64  # candidate runs are priced in blocks of this many (fewer recompilations)
 
 
 @dataclass(frozen=True)
@@ -297,6 +298,7 @@ class _Analysis:
     fits_wo: list | None = None
     g1: tuple | None = None
     skipped: list = field(default_factory=list)
+    gate_loc: dict = field(default_factory=dict)  # gate name -> (data rows, standardised residuals)
 
 
 @dataclass
@@ -342,6 +344,7 @@ class Campaign:
         self._design_issued = False
         self._min_level = 0
         self._removals = 0
+        self._buy_cycles = 0
         self._cache: _Analysis | None = None
         self._report_cache: Report | None = None
         self._report_cache_key: tuple = ()
@@ -520,10 +523,16 @@ class Campaign:
             lq, hq = np.zeros(len(U)), np.zeros(len(U), bool)
         else:
             lq, hq = log2q
-        mean, var = cost.predict_log2(post, U, L, lq, hq)
+        # pad the runs to a multiple of PRICE_PAD (copies of the first row) so that the compiled predictors
+        # are reused while the candidate set grows with the sites; the padding is sliced off again
+        m = len(U)
+        mp = PRICE_PAD * math.ceil(max(m, 1) / PRICE_PAD)
+        idx = np.concatenate([np.arange(m), np.zeros(mp - m, dtype=int)])
+        mean, var = cost.predict_log2(post, U[idx], L[idx], np.asarray(lq)[idx], np.asarray(hq)[idx])
         w = jnp.ones(mean.shape[0]) / mean.shape[0]
-        return np.asarray(cost.expected_cost(mean, var, w)), np.asarray(
-            cost.cost_cap(mean, var, w, CAP_QUANTILE)
+        return (
+            np.asarray(cost.expected_cost(mean, var, w))[:m],
+            np.asarray(cost.cost_cap(mean, var, w, CAP_QUANTILE))[:m],
         )
 
     # ------------------------------------------------------------------ data
@@ -635,7 +644,7 @@ class Campaign:
             u[cf.idx_B] = (np.asarray(cf.w_A)[:, None] * comp[:, cf.idx_B]).sum(axis=0)  # A-weights on B
             u[cf.idx_A] = (np.asarray(cf.w_B)[:, None] * comp[:, cf.idx_A]).sum(axis=0)  # B-weights on A
             zz = np.asarray(ndtri(jnp.asarray(np.clip(u, 1e-12, 1 - 1e-12))))
-            g1 = (zz, (u > 0.025) & (u < 0.975))
+            g1 = (zz, (u > 0.025) & (u < 0.975), np.asarray(rows))
         return np.asarray(w), f"stacking weights from {len(rows)} held-out level-{finest} runs", g1
 
     @staticmethod
@@ -682,6 +691,26 @@ class Campaign:
         self._cache = an
         return an
 
+    def _noise_fn(self, f: _Fit):
+        """Candidate -> (S_k, 1) noise variance of a new row in THIS structure's Lambda units, per draw.
+
+        exp(m_s + b_s . hbar) of each kept draw (the latent field zeta is left at its mean). The acquisition
+        needs it per structure because the units follow the transform (identity: physical, log: relative).
+        """
+        ms = np.asarray(f.post.theta["m_s"]).reshape(-1)[f.idx]
+        bs = np.asarray(f.post.theta["b_s"]).reshape(-1, self._k)[f.idx]
+
+        def fn(cand):
+            return np.exp(ms + bs @ np.asarray(cand.hbar, dtype=float))[:, None]
+
+        return fn
+
+    def _weighted(self, fits, weights):
+        return [
+            f.sp._replace(weight=float(w), noise_var=self._noise_fn(f))
+            for f, w in zip(fits, weights, strict=True)
+        ]
+
     def _analyse_once(self, reuse: list | None) -> _Analysis:
         data, levels = self._build_data()
         if int(np.sum(data.mask)) < MIN_ROWS:
@@ -691,7 +720,7 @@ class Campaign:
         skipped: list[str] = []
         fits = reuse if reuse is not None else self._fit_all(data, key, skipped)
         weights, wnote, g1 = self._stacking(data, levels, fits, key)
-        structures = [f.sp._replace(weight=float(w)) for f, w in zip(fits, weights, strict=True)]
+        structures = self._weighted(fits, weights)
         moments = self._moments(fits, data, Xs)
         draws, w = self._pool(fits, weights, moments, jax.random.fold_in(key, 5))
         m_y = np.asarray(predict.weighted_quantile(draws, w, 0.5))
@@ -741,6 +770,7 @@ class Campaign:
         if an.g1 is None:
             out.append(gates.GateResult("G1", "not testable", {"reason": an.weight_note}))
         else:
+            an.gate_loc["G1"] = (an.g1[2], np.asarray(an.g1[0]))
             out.append(safe("G1", lambda: gates.g1_level_holdout(an.g1[0], an.g1[1], True)))
         # G2 (highest-weight structure, a subset of draws and runs)
         ft = fits[top]
@@ -751,7 +781,10 @@ class Campaign:
             blocks = [np.array([r]) for r in rows]
             idx = _thin_idx(int(ft.sp.z.shape[0]), G2_MAX_DRAWS)
             params = jax.tree_util.tree_map(lambda a: a[jnp.asarray(idx)], ft.sp.params)
-            return gates.g2_block_loo(params, data, ft.sp.z[jnp.asarray(idx)], ft.cfg, blocks)
+            res = gates.g2_block_loo(params, data, ft.sp.z[jnp.asarray(idx)], ft.cfg, blocks)
+            if "z_marginal" in res.stats:
+                an.gate_loc["G2"] = (rows, np.asarray(res.stats["z_marginal"]))
+            return res
 
         out.append(safe("G2", g2))
 
@@ -772,14 +805,17 @@ class Campaign:
 
         def g4():
             nonlocal fits_wo
-            if len(active) < 3:
-                return gates.g4_pre_asymptotic(an.m_y, an.sigma_epi, None)
+            if len(active) < 4:  # removing the coarsest level must leave at least 3 levels
+                return gates.GateResult("G4", "not testable", {"reason": f"{len(active)} levels (< 4)"})
             data_wo = dataclasses.replace(data, mask=mask & (an.levels > int(active.min())))
             fits_wo = self._fit_all(data_wo, jax.random.fold_in(key, 91))
             mom = self._moments(fits_wo, data_wo, self.problem.sigma_n)
             d, w = self._pool(fits_wo, an.weights, mom, jax.random.fold_in(key, 92))
             m_wo = np.asarray(predict.weighted_quantile(d, w, 0.5))
-            return gates.g4_pre_asymptotic(an.m_y, an.sigma_epi, m_wo)
+            sig_wo = np.asarray(
+                acq.sigma_epi_physical(self._weighted(fits_wo, an.weights), data_wo, self.problem.sigma_n)
+            )
+            return gates.g4_pre_asymptotic(an.m_y, an.sigma_epi, m_wo, sig_wo)
 
         out.append(safe("G4", g4))
         # G5
@@ -984,7 +1020,13 @@ class Campaign:
         for g in an.gates:
             if "error" in g.stats:
                 notes.append(f"{g.name} could not run: {g.stats['error']}")
-        failed = [g.name for g in an.gates if g.status == "fail"]
+        failed = self._blocking_fails(an.gates)
+        for g in an.gates:
+            if g.name == "G6" and g.status == "fail":
+                notes.append(
+                    f"warning: G6 shape: median deviation of the 2.5/97.5% quantiles from m +- 1.96 s is "
+                    f"{g.stats['median_rel_diff']:.2f} s (> 0.2); the posterior is not Gaussian"
+                )
         if failed and self.status != "success":
             notes.append(f"gates failed: {failed}; the output is not calibrated")
         ratio = float(np.max(an.sigma_epi / an.eps))
@@ -1114,8 +1156,12 @@ class Campaign:
             return []
         an = self._analyse()
         ratio = float(np.max(an.sigma_epi / an.eps))
-        fails = [g.name for g in an.gates if g.status == "fail"]
+        fails = self._blocking_fails(an.gates)
         self._record("ask", max_ratio=ratio, gates_failed=fails)
+        if not self._pending and self._buy_cycles < MAX_REPAIR:
+            probe = self._repair_probe(an, [n for n in fails if n in ("G1", "G2")], quotes)
+            if probe is not None:
+                return [probe]
         if ratio <= 1.0:
             if self._pending:
                 self.save()
@@ -1171,6 +1217,51 @@ class Campaign:
         self._record("issued", n_probes=len(out), mode=self.mode)
         self.save()
         return out
+
+    @staticmethod
+    def _blocking_fails(gate_list) -> list[str]:
+        """Names of failed gates that block "success". G6 (shape) is a warning only (spec Step 3)."""
+        return [g.name for g in gate_list if g.status == "fail" and g.name != "G6"]
+
+    def _repair_probe(self, an: _Analysis, names: list[str], quotes) -> Probe | None:
+        """Spec Step 3 repair: buy a probe one level finer than any run so far, where |z| is largest.
+
+        z is the standardised residual of the failed G1 (hold-out) or G2 (block LOO) gate; ``gate_loc`` holds
+        the data rows and their z. At most MAX_REPAIR such purchases per campaign. Returns the (reserved)
+        probe, or None when no failed gate has a location or the probe's cap does not fit the budget.
+        """
+        best = None
+        for name in names:
+            loc = an.gate_loc.get(name)
+            if loc is None or len(loc[0]) == 0:
+                continue
+            rows, z = np.asarray(loc[0]), np.abs(np.asarray(loc[1], dtype=float))
+            i = int(np.nanargmax(z))
+            if best is None or z[i] > best[0]:
+                best = (float(z[i]), int(rows[i]), name)
+        if best is None:
+            return None
+        _, row, name = best
+        inp = self.problem.inputs
+        u = tuple(float(t) for t in inp.from_unit(np.asarray(an.data.X)[row])[: self._nc])
+        finest = int(an.levels[np.asarray(an.data.mask, dtype=bool)].max())
+        probe = Probe(self._new_id("r"), u, self._h_of_level(finest + 1), None)
+        q = None
+        if quotes is not None:
+            raw = list(quotes([probe]))
+            ok = raw[0] is not None and raw[0] > 0
+            q = (np.array([math.log2(raw[0]) if ok else 0.0]), np.array([ok]))
+        _, cap = self._price(self._cost_posterior(), [probe.u], [finest + 1], q)
+        if self.reserved + float(cap[0]) > self.problem.budget:
+            return None
+        self._buy_cycles += 1
+        self._pending[probe.probe_id] = {"probe": probe, "cap": float(cap[0])}
+        self.notes.append(
+            f"repair {self._buy_cycles}: {name} failed, probe at level {finest + 1} where |z| is largest"
+        )
+        self._record("repair", gate=name)
+        self.save()
+        return probe
 
     def _select(self, an: _Analysis, cands, key) -> list[int]:
         chosen, _ = acq.select_batch(
@@ -1233,6 +1324,7 @@ class Campaign:
             "design_issued": self._design_issued,
             "min_level": self._min_level,
             "removals": self._removals,
+            "buy_cycles": self._buy_cycles,
             "results": meta,
         }
         npz_tmp = self.state_dir / "results.tmp.npz"
@@ -1278,6 +1370,7 @@ class Campaign:
         c.history, c.notes = s["history"], s["notes"]
         c._design_issued = s["design_issued"]
         c._min_level, c._removals = s["min_level"], s["removals"]
+        c._buy_cycles = s.get("buy_cycles", 0)
         return c
 
 
@@ -1319,53 +1412,89 @@ def run_campaign(campaign: Campaign, oracle, max_rounds: int = 1000, poll_sleep:
 # ----------------------------------------------------------------------------------------------
 
 
-def oracle_values(truth, campaign: Campaign, candidates, n_refit_draws: int, key=None, source: str = "model"):
-    """See synthetic.a12_oracle_ranking. Imported lazily by it so that campaign does not import synthetic."""
+def _fantasy_outcome(truth, campaign: Campaign, an: _Analysis, cand: Candidate, key, source: str) -> float:
+    """One fantasy outcome (physical units) of the probe ``cand``: the posterior predictive of a random draw
+    ("model": what Step 5 does) or the truth's f(x, h) plus noise ("truth")."""
+    if source == "truth":
+        return float(truth.value(np.asarray(cand.Xa), float(cand.hbar[0]))) + truth.noise_sd * float(
+            jax.random.normal(jax.random.fold_in(key, 3))
+        )
+    X, H, run, mask = _arrays(an.data)
+    k1, k2, k3 = jax.random.split(key, 3)
+    s_i = int(jax.random.choice(k1, len(an.fits), p=jnp.asarray(an.weights)))
+    f = an.fits[s_i]
+    j = int(jax.random.randint(k2, (), 0, int(f.sp.z.shape[0])))
+    p = jax.tree_util.tree_map(lambda a, j=j: a[j], f.sp.params)
+    Hr = jnp.asarray(cand.hbar, dtype=float)[None, :]
+    Pr = jnp.broadcast_to(p.P[0], Hr.shape)
+    xa = jnp.asarray(cand.Xa, dtype=float)
+    nv = jnp.asarray(an.structures[s_i].noise_var(cand)[j], dtype=float)
+    mean, var = model.predict_level(p, _pd(X, H, run, mask, f.sp.z[j]), f.sp.z[j], f.cfg, xa, Hr, Pr, nv)
+    return float(f.tf.inverse(mean[0] + jnp.sqrt(var[0]) * jax.random.normal(k3)))
+
+
+def refit_H(campaign: Campaign, an: _Analysis, dataset: Dataset, key):
+    """Full MCMC refit of every structure on ``dataset`` with the stacking weights of ``an`` held fixed
+    (spec Step 5); returns (H_n of the refitted pool, max over structures of rhat of log p0)."""
+    from gcbml.mcmc import diagnostics as dg
+
+    data2, _ = campaign._build_data(dataset)
+    fits2 = campaign._fit_all(data2, key)
+    structs2 = campaign._weighted(fits2, an.weights)
+    sig2 = np.asarray(acq.sigma_epi_physical(structs2, data2, campaign.problem.sigma_n))
+    rhat = max(float(dg.rhat(np.asarray(f.post.theta["log_p0"])[..., 0])) for f in fits2)
+    return float(acq.H_value(sig2, an.eps, campaign.mode)), rhat
+
+
+def fantasy_dataset(campaign: Campaign, cand: Candidate, y: float, tag: str) -> Dataset:
+    inp = campaign.problem.inputs
+    u = inp.from_unit(np.asarray(cand.Xa, float))[0]
+    h = tuple(float(t) for t in campaign.problem.resolution.h_at(tuple(int(t) for t in cand.levels)))
+    probe = Probe(f"fantasy-{tag}", tuple(float(t) for t in u), h, None)
+    res = RunResult(
+        probe, np.asarray(u, float)[None, :], np.array([y]), np.zeros(1, bool), float(cand.cost_mean)
+    )
+    return Dataset(list(campaign.dataset.results) + [res])
+
+
+def oracle_values(
+    truth, campaign: Campaign, candidates, n_refit_draws: int, key=None, source: str = "model",
+    se_target: float | None = None, n_max: int | None = None, H_base: float | None = None,
+):  # fmt: skip
+    """See synthetic.a12_oracle_ranking. Imported lazily by it so that campaign does not import synthetic.
+
+    n_refit_draws fantasies per candidate; with ``se_target`` the number grows (doubling, up to ``n_max``)
+    until the Monte Carlo s.e. of the mean gain is below se_target x the mean gain. ``H_base`` replaces H
+    of the current posterior as the reference (e.g. the mean over refits of the unchanged data, which removes
+    the refit's own Monte Carlo bias from the gain).
+    """
     from gcbml.synthetic import OracleRank
 
     an = campaign._analyse()
     key = jax.random.PRNGKey(0) if key is None else key
-    Xs = campaign.problem.sigma_n
-    H_now = float(acq.H_value(an.sigma_epi, an.eps, campaign.mode))
-    inp = campaign.problem.inputs
-    X, H, run, mask = _arrays(an.data)
+    H_now = float(acq.H_value(an.sigma_epi, an.eps, campaign.mode)) if H_base is None else float(H_base)
     out = []
     for i, cand in enumerate(candidates):
-        gains = []
-        u = inp.from_unit(np.asarray(cand.Xa, float))[0]
-        h = tuple(float(t) for t in campaign.problem.resolution.h_at(tuple(int(t) for t in cand.levels)))
-        for r in range(n_refit_draws):
-            kf = jax.random.fold_in(key, i * 1000 + r)
-            if source == "truth":
-                y = float(truth.value(np.asarray(cand.Xa), float(cand.hbar[0]))) + truth.noise_sd * float(
-                    jax.random.normal(jax.random.fold_in(kf, 3))
-                )
-            else:
-                k1, k2, k3 = jax.random.split(kf, 3)
-                s_i = int(jax.random.choice(k1, len(an.fits), p=jnp.asarray(an.weights)))
-                f = an.fits[s_i]
-                j = int(jax.random.randint(k2, (), 0, int(f.sp.z.shape[0])))
-                p = jax.tree_util.tree_map(lambda a, j=j: a[j], f.sp.params)
-                Hr = jnp.asarray(cand.hbar, dtype=float)[None, :]
-                Pr = jnp.broadcast_to(p.P[0], Hr.shape)
-                xa = jnp.asarray(cand.Xa, dtype=float)
-                nv = jnp.asarray(cand.noise_var, dtype=float)
-                mean, var = model.predict_level(
-                    p, _pd(X, H, run, mask, f.sp.z[j]), f.sp.z[j], f.cfg, xa, Hr, Pr, nv
-                )
-                zf = mean[0] + jnp.sqrt(var[0]) * jax.random.normal(k3)
-                y = float(f.tf.inverse(zf))
-            probe = Probe(f"fantasy-{i}-{r}", tuple(float(t) for t in u), h, None)
-            res = RunResult(
-                probe, np.asarray(u, float)[None, :], np.array([y]), np.zeros(1, bool), float(cand.cost_mean)
+        gains, rhats = [], []
+        n_target = n_refit_draws
+        while True:
+            while len(gains) < n_target:
+                kf = jax.random.fold_in(key, i * 100000 + len(gains))
+                y = _fantasy_outcome(truth, campaign, an, cand, kf, source)
+                ds = fantasy_dataset(campaign, cand, y, f"{i}-{len(gains)}")
+                H_after, rh = refit_H(campaign, an, ds, jax.random.fold_in(kf, 9))
+                gains.append(H_now - H_after)
+                rhats.append(rh)
+            g = np.asarray(gains)
+            se = float(g.std(ddof=1) / np.sqrt(len(g))) if len(g) > 1 else float("inf")
+            rel = se / abs(g.mean()) if g.mean() != 0 else float("inf")
+            if se_target is None or rel < se_target or len(gains) >= (n_max or len(gains)):
+                break
+            n_target = min(2 * len(gains), n_max) if n_max else 2 * len(gains)
+        out.append(
+            OracleRank(
+                i, float(g.mean() / cand.cost_mean), float(g.mean()), se / cand.cost_mean,
+                len(g), rel, max(rhats),
             )
-            ds = Dataset(list(campaign.dataset.results) + [res])
-            data2, _ = campaign._build_data(ds)
-            fits2 = campaign._fit_all(data2, jax.random.fold_in(kf, 9))
-            structs2 = [f2.sp._replace(weight=float(w)) for f2, w in zip(fits2, an.weights, strict=True)]
-            sig2 = np.asarray(acq.sigma_epi_physical(structs2, data2, Xs))
-            gains.append(H_now - float(acq.H_value(sig2, an.eps, campaign.mode)))
-        g = np.asarray(gains)
-        se = float(g.std(ddof=1) / np.sqrt(len(g))) if len(g) > 1 else 0.0
-        out.append(OracleRank(i, float(g.mean() / cand.cost_mean), float(g.mean()), se / cand.cost_mean))
+        )  # fmt: skip
     return sorted(out, key=lambda t: -t.value)
