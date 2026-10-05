@@ -255,8 +255,14 @@ $$ \sigma_{env}^2(x, h) = E_{\vartheta, c, \mu \mid D} [ \sum_j \bar h_j^{2 p_j(
 - **Cheapest level:** a space-filling design, as large as is useful. This is Yi's abundant LF, and all of it enters the likelihood.
 - **Prerequisite: the A12 test,** before the first real campaign. Step 5 values probes at unprobed finer levels correctly only if A12 holds.
   - Synthetic truths: 20 random draws of \(f(x, h) = f_0(x) + a(x) \bar h^{p}\), with \(x\) in 2D and \(p\) drawn from [0.7, 2.5]. There is data at \(\bar h = 1, 1/2, 1/4\), and candidates also at \(\bar h = 1/8\) and \(1/16\), with cost \(\propto 2^{3\ell}\).
-  - Oracle: the value of each of the top 10 candidates, computed by full MCMC refits on its fantasy outcomes.
-  - Pass rule: the acquisition's top candidate is in the oracle's top 3 in at least 16 of 20 cases [assumption].
+  - Candidates: the acquisition's best candidate at EACH level 0-4 (5 candidates, so finer unprobed levels are always
+    compared), plus its overall best.
+  - Oracle: the value (expected reduction of \(H\)) of each candidate, from full MCMC refits on fantasy outcomes,
+    with enough fantasies that its Monte Carlo standard error is below 10% of the value (report it).
+  - Pass rule [assumption; a top-3 ranking among near-equal candidates would measure mostly oracle noise]:
+    (i) regret: the oracle value per cost of the acquisition's choice is at least 0.8 times the oracle's best
+    in at least 16 of 20 truths; (ii) level calibration: for every level, the median over truths of
+    (acquisition gain / oracle gain) is in [0.5, 2].
   - If it fails: replace the reweighting by short MCMC refits for the 5 best candidates of each step. This costs more, and the cost must be measured.
 - **Ladder:** nested Sobol designs in \(u\) at the levels above it. Stacking designs eq 9 gives starting sizes.
 - **Replicates:** at 3 or more levels at 3 or more sites.
@@ -272,9 +278,9 @@ $$ \sigma_{env}^2(x, h) = E_{\vartheta, c, \mu \mid D} [ \sum_j \bar h_j^{2 p_j(
 | G1 level hold-out | cross-fitted prediction of the finest level, a predictive check of the finest mesh as in Oliver et al. 1311.0828 eq 17 | 95% coverage within binomial limits; no sign bias; \(C_{LOO}\) near 1 (Bachoc 1301.4320 eq 6) |
 | G2 block LOO | leave out whole runs | z ~ N(0, 1); U statistic (Overstall & Woods eq 10) |
 | G3 noise | replicate spread against \(s^2\) | chi-square, p > 0.05 |
-| G4 pre-asymptotic | refit without the coarsest level | the target moves less than \(\sigma_{epi}\); else remove that level |
+| G4 pre-asymptotic | refit without the coarsest level | at each \(x \in \Sigma_N\), \(z = \Delta m / \sqrt{\max(\sigma_{w}^2 - \sigma_{f}^2, (0.1 \sigma_f)^2)}\) (under the model, the change of a posterior mean when data are added has variance \(\sigma_w^2 - \sigma_f^2\)); fail if more than 10% of the points have \(\lvert z \rvert > 2.5\); then remove that level, but never below 3 levels [assumption] |
 | G5 structure | monotone coordinates stay monotone | no violation on \(\Sigma_N\) |
-| G6 shape | 2.5/97.5% quantiles against \(m_y \pm 1.96\sigma_y\) | difference < 10% of \(\sigma_y\) |
+| G6 shape | 2.5/97.5% quantiles against \(m_y \pm 1.96\sigma_y\) | median over \(\Sigma_N\) of the difference < 0.2 \(\sigma_y\); a warning in the report, not a blocking gate, because \(\sigma_y\) is a quantile half-width and P1 does not assume a Gaussian [assumption] |
 | G7 prior | halve and double each prior scale (importance reweighting; refit if ESS < 400) | \(m_y\) moves < \(0.5\sigma_{epi}\) and \(\sigma_{epi}\) changes < 20%; else the output is flagged "prior-dominated" |
 
 - **Repair:** at most 2 cycles per gate: remove a pre-asymptotic level (G4), recompute the weights, or buy a finer probe where \(|z|\) is largest.
