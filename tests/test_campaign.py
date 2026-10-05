@@ -488,12 +488,12 @@ def test_a_posterior_that_cannot_be_fitted_is_a_clear_error():
 
 @pytest.mark.slow
 def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
-    t = A12Truth(11, d=2, budget=6000.0, eps_abs=0.05)
+    t = A12Truth(11, d=2, budget=2500.0, eps_abs=0.05)
     settings = CampaignSettings(
         n_warmup=150,
         n_samples=100,
         n_chains=4,
-        q=10,
+        q=60,
         n_candidates_u=16,
         extra_levels=2,
         h_kernels=("twy2", "lb"),
@@ -501,9 +501,9 @@ def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
         seed=2,
     )
     c = make(t, settings, state_dir=tmp_path)
-    audit = Audit(t.oracle(seed=1, cost_sigma=0.3), c, 6000.0)
+    audit = Audit(t.oracle(seed=1, cost_sigma=0.3), c, 2500.0)
     rep = run_campaign(c, audit)
-    assert c.spent <= 6000.0
+    assert c.spent <= 2500.0
     assert rep.status in {"success", "P2", "uncalibrated"}
     xs = c.problem.sigma_n
     f0 = t.truth(xs)
@@ -511,7 +511,7 @@ def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
     inside = np.abs(np.asarray(rep.m_y) - f0) <= 2 * sig
     cover = float(inside.mean())
     with capsys.disabled():
-        print("\nE2E status", rep.status, "spent", round(rep.spent, 1), "of 6000")
+        print("\nE2E status", rep.status, "spent", round(rep.spent, 1), "of 2500")
         print("E2E coverage of f0 in m_y +- 2 sigma_epi:", cover)
         print("E2E allocation per level:", {k: round(v, 1) for k, v in sorted(rep.allocation.items())})
         print("E2E gates:", {g.name: g.status for g in rep.gates})
@@ -661,3 +661,22 @@ def test_g4_passes_when_the_coarsest_level_is_asymptotic_and_fails_when_it_is_no
     assert passes >= 0.9 * n, passes
     bad = [_g4(_four_level_campaign(s, preasymptotic=True)) for s in range(5)]
     assert sum(g.status == "fail" for g in bad) >= 4, [g.stats.get("frac_exceed") for g in bad]
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_when_the_forecast_mode_selects_nothing_the_other_mode_is_tried(monkeypatch):
+    """The softmax (P2) criterion can find no positive gain by Monte Carlo chance while the hinge one does."""
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e-4)
+    c = make(t)
+    run_initial(c, t)
+    seen = []
+
+    def select(self, an, cands, key):
+        seen.append(self.mode)
+        return [0, 1] if self.mode == "hinge" else []
+
+    monkeypatch.setattr(Campaign, "_select", select)
+    c.mode = "softmax"
+    probes = c.ask()
+    assert len(probes) == 2 and "softmax" in seen and seen[-1] == "hinge"
+    assert c.status == "running"

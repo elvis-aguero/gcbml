@@ -1200,8 +1200,8 @@ class Campaign:
         if fc.p_exceed > 0.5:
             self.notes.append(f"warning: forecast probability of exceeding the budget is {fc.p_exceed:.2f}")
         chosen = self._select(an, cands, key)
-        if not chosen and self.mode == "hinge":
-            self.mode = "softmax"
+        if not chosen:  # the other criterion may still find a positive gain (Monte Carlo noise in the gains)
+            self.mode = "softmax" if self.mode == "hinge" else "hinge"
             chosen = self._select(an, cands, key)
         if not chosen:
             if self._pending:
