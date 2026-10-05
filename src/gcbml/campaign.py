@@ -557,8 +557,12 @@ class Campaign:
 
     # ------------------------------------------------------------------ Step 2: fits and weights
 
-    def _fit_all(self, data: PaddedData, key, skip_note: list | None = None) -> list[_Fit]:
+    def _fit_all(
+        self, data: PaddedData, key, skip_note: list | None = None, init: list | None = None,
+        n_warmup: int | None = None,
+    ) -> list[_Fit]:  # fmt: skip
         s = self.settings
+        n_warmup = s.n_warmup if n_warmup is None else n_warmup
         y = np.asarray(data.y, dtype=float)
         fits = []
         i = 0
@@ -575,7 +579,8 @@ class Campaign:
                 z = np.asarray(tf.forward(jnp.asarray(y)))
                 post = inference.fit(
                     jax.random.fold_in(key, i), data, z, z, cfg, self.scales, self._nc,
-                    s.n_warmup, s.n_samples, s.n_chains, s.varying_order,
+                    n_warmup, s.n_samples, s.n_chains, s.varying_order,
+                    init=None if init is None else init[i],
                 )  # fmt: skip
                 params, zs = inference.flatten(post)
                 idx = _thin_idx(int(zs.shape[0]), N_ACQ_DRAWS)
@@ -1437,13 +1442,17 @@ def _fantasy_outcome(truth, campaign: Campaign, an: _Analysis, cand: Candidate, 
     return float(f.tf.inverse(mean[0] + jnp.sqrt(var[0]) * jax.random.normal(k3)))
 
 
-def refit_H(campaign: Campaign, an: _Analysis, dataset: Dataset, key):
+def refit_H(campaign: Campaign, an: _Analysis, dataset: Dataset, key, warm: bool = False, n_warmup=None):
     """Full MCMC refit of every structure on ``dataset`` with the stacking weights of ``an`` held fixed
-    (spec Step 5); returns (H_n of the refitted pool, max over structures of rhat of log p0)."""
+    (spec Step 5); returns (H_n of the refitted pool, max over structures of rhat of log p0).
+
+    ``warm``: chains start at the last draws of the base posterior ``an`` (inference.fit(init=...)), with
+    ``n_warmup`` iterations of warm-up (default the campaign's)."""
     from gcbml.mcmc import diagnostics as dg
 
     data2, _ = campaign._build_data(dataset)
-    fits2 = campaign._fit_all(data2, key)
+    init = [f.post for f in an.fits] if warm else None
+    fits2 = campaign._fit_all(data2, key, init=init, n_warmup=n_warmup)
     structs2 = campaign._weighted(fits2, an.weights)
     sig2 = np.asarray(acq.sigma_epi_physical(structs2, data2, campaign.problem.sigma_n))
     rhat = max(float(dg.rhat(np.asarray(f.post.theta["log_p0"])[..., 0])) for f in fits2)
@@ -1464,7 +1473,7 @@ def fantasy_dataset(campaign: Campaign, cand: Candidate, y: float, tag: str) -> 
 def oracle_values(
     truth, campaign: Campaign, candidates, n_refit_draws: int, key=None, source: str = "model",
     se_target: float | None = None, n_max: int | None = None, H_base: float | None = None,
-    max_h_ratio: float = 10.0,
+    max_h_ratio: float = 10.0, warm: bool = False, paired: bool = False, refit_warmup: int | None = None,
 ):  # fmt: skip
     """See synthetic.a12_oracle_ranking. Imported lazily by it so that campaign does not import synthetic.
 
@@ -1474,13 +1483,18 @@ def oracle_values(
     the refit's own Monte Carlo bias from the gain). A refit whose H_after exceeds ``max_h_ratio`` x the
     reference is a divergent fit (seen once, with H ~ 1e51, in 60 refits): it is counted in ``n_discarded``
     and left out of the mean, and the raw gains are returned for any other treatment. [assumption]
+
+    ``warm``: every refit starts at the base posterior (``refit_warmup`` warm-up iterations).
+    ``paired``: the gain of fantasy number j is H(refit of the unchanged data) - H(refit with the fantasy),
+    both refits with the SAME key (common random numbers: the Monte Carlo error of the two largely cancels);
+    the key of fantasy number j is shared by all candidates, so the reference refit of j is computed once.
     """
     from gcbml.synthetic import OracleRank
 
     an = campaign._analyse()
     key = jax.random.PRNGKey(0) if key is None else key
     H_now = float(acq.H_value(an.sigma_epi, an.eps, campaign.mode)) if H_base is None else float(H_base)
-    out = []
+    out, refs = [], {}
     for i, cand in enumerate(candidates):
         gains, rhats, n_drawn = [], [], 0
         n_target = n_refit_draws
@@ -1489,9 +1503,16 @@ def oracle_values(
                 kf = jax.random.fold_in(key, i * 100000 + n_drawn)
                 y = _fantasy_outcome(truth, campaign, an, cand, kf, source)
                 ds = fantasy_dataset(campaign, cand, y, f"{i}-{n_drawn}")
-                H_after, rh = refit_H(campaign, an, ds, jax.random.fold_in(kf, 9))
+                if paired:
+                    kj = jax.random.fold_in(key, 888000 + n_drawn)
+                    if n_drawn not in refs:
+                        refs[n_drawn] = refit_H(campaign, an, campaign.dataset, kj, warm, refit_warmup)[0]
+                    H_ref = refs[n_drawn]
+                else:
+                    kj, H_ref = jax.random.fold_in(kf, 9), H_now
+                H_after, rh = refit_H(campaign, an, ds, kj, warm, refit_warmup)
                 n_drawn += 1
-                gains.append(H_now - H_after)
+                gains.append(H_ref - H_after)
                 rhats.append(rh)
             raw = np.asarray(gains)
             g = raw[np.isfinite(raw) & (raw > -(max_h_ratio - 1.0) * abs(H_now))]
