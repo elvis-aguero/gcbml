@@ -373,34 +373,44 @@ def test_g3_not_testable_without_replicates():
 # ----------------------------------------------------------------------------------------------
 
 
-def test_g4_z_uses_the_variance_of_the_change_of_the_mean():
-    n = 100
-    m_full = np.zeros(n)
-    sf = np.full(n, 0.5)
-    sw = np.full(n, 1.0)  # var of the change under the model: 1 - 0.25
-    sd = np.sqrt(0.75)
-    ok = gates.g4_pre_asymptotic(m_full, sf, np.full(n, 2.0 * sd), sw)  # |z| = 2 everywhere
-    assert ok.status == "pass" and ok.stats["frac_exceed"] == 0.0
-    assert ok.stats["max_abs_z"] == pytest.approx(2.0)
-    bad = gates.g4_pre_asymptotic(m_full, sf, np.full(n, 3.0 * sd), sw)  # |z| = 3 everywhere
-    assert bad.status == "fail" and bad.stats["advice"] == "remove the coarsest level"
-    # 10% of the points may exceed 2.5; 11% may not
-    m = np.zeros(n)
-    m[:10] = 3.0 * sd
-    assert gates.g4_pre_asymptotic(m_full, sf, m, sw).status == "pass"
-    m[:11] = 3.0 * sd
-    assert gates.g4_pre_asymptotic(m_full, sf, m, sw).status == "fail"
-    assert gates.g4_pre_asymptotic(m_full, sf, None, None).status == "not testable"
+def g4_setup(seed, shift=0.0):
+    plist, data, z, blocks = g2_setup(seed)
+    block = np.concatenate(blocks[:12])  # the "coarsest level": 12 runs, one output each
+    z = np.asarray(z).copy()
+    z[block] += shift
+    return plist, data, z, block
 
 
-def test_g4_denominator_is_floored_at_a_tenth_of_sigma_full():
-    n = 50
-    sf = np.full(n, 0.5)
-    # sigma_w == sigma_f: the model predicts no change; the floor (0.05) sets the scale
-    r = gates.g4_pre_asymptotic(np.zeros(n), sf, np.full(n, 0.1), sf)
-    assert r.stats["max_abs_z"] == pytest.approx(2.0)  # 0.1 / (0.1 * 0.5)
-    assert r.status == "pass"
-    assert gates.g4_pre_asymptotic(np.zeros(n), sf, np.full(n, 0.2), sf).status == "fail"  # z = 4
+def test_g4_passes_when_the_coarsest_level_follows_the_model_and_fails_when_it_does_not():
+    plist, data, z, block = g4_setup(0)
+    zz = jnp.stack([jnp.asarray(z)] * 3)
+    r = gates.g4_coarsest_level(stack([plist[0]] * 3), data, zz, CFG, block)
+    assert r.name == "G4" and r.status == "pass", r.stats
+    assert r.stats["p"] == pytest.approx(stats.chi2.sf(r.stats["statistic"], len(block)), rel=1e-12)
+    assert r.stats["dof"] == len(block)
+    plist, data, z, block = g4_setup(0, shift=1.0)  # a smooth-free offset of the coarsest level only
+    r = gates.g4_coarsest_level(stack([plist[0]] * 3), data, jnp.stack([jnp.asarray(z)] * 3), CFG, block)
+    assert r.status == "fail" and r.stats["advice"] == "remove the coarsest level"
+
+
+def test_g4_whitens_with_the_pooled_predictive_covariance_of_the_block():
+    plist, data, z, block = g4_setup(1)
+    p_a, p_b = plist[0], plist[0]._replace(c0=plist[0].c0 + 0.3)
+    zz = jnp.stack([jnp.asarray(z)] * 2)
+    r = gates.g4_coarsest_level(stack([p_a, p_b]), data, zz, CFG, block)
+    m_a, c_a = gates.block_loo(p_a, data, jnp.asarray(z), CFG, block)
+    m_b, c_b = gates.block_loo(p_b, data, jnp.asarray(z), CFG, block)
+    d = np.asarray(m_a - m_b)
+    c_pool = 0.5 * (np.asarray(c_a) + np.asarray(c_b)) + 0.25 * np.outer(d, d)
+    mbar = 0.5 * np.asarray(m_a + m_b)
+    e = np.linalg.solve(np.linalg.cholesky(c_pool), np.asarray(z)[block] - mbar)
+    assert r.stats["statistic"] == pytest.approx(float(e @ e), rel=1e-8)
+
+
+def test_g4_not_testable_without_a_block():
+    plist, data, z, _ = g4_setup(0)
+    r = gates.g4_coarsest_level(stack([plist[0]]), data, jnp.asarray(z)[None], CFG, np.zeros(0, dtype=int))
+    assert r.status == "not testable"
 
 
 def test_g5_monotone():

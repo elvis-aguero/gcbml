@@ -296,7 +296,6 @@ class _Analysis:
     gates: list
     notes: list
     weight_note: str = ""
-    fits_wo: list | None = None
     g1: tuple | None = None
     skipped: list = field(default_factory=list)
     gate_loc: dict = field(default_factory=dict)  # gate name -> (data rows, standardised residuals)
@@ -692,17 +691,18 @@ class Campaign:
         for _ in range(MAX_REPAIR + 1):
             an = self._analyse_once(reuse)
             g4 = next((g for g in an.gates if g.name == "G4"), None)
+            active = np.unique(an.levels[np.asarray(an.data.mask, dtype=bool)])
             if (
                 repair
                 and g4 is not None
                 and g4.status == "fail"
                 and self._removals < MAX_REPAIR
-                and an.fits_wo
+                and len(active) >= 4  # at least 3 levels must remain
             ):
-                active = np.unique(an.levels[np.asarray(an.data.mask, dtype=bool)])
                 self._min_level = int(active.min()) + 1
                 self._removals += 1
-                reuse = an.fits_wo
+                reuse = None  # refit on the data without the level (warm-started from this fit's draws)
+                self._warm = self._last_draws(an.fits)
                 self.notes.append(
                     f"G4 failed: coarsest level removed (levels < {self._min_level} are ignored)"
                 )
@@ -778,7 +778,7 @@ class Campaign:
             (len(self.dataset), self._min_level), data, levels, fits, weights, structures, m_y, sigma,
             self._eps(m_y), moments, [], [], wnote, None, g1, skipped,
         )  # fmt: skip
-        an.gates, an.fits_wo = self._gates(an, key)
+        an.gates, _ = self._gates(an, key)
         return an
 
     def _gates(self, an: _Analysis, key):
@@ -787,7 +787,6 @@ class Campaign:
         mask = np.asarray(data.mask, dtype=bool)
         cens = np.asarray(data.censored, dtype=bool)
         out: list[gates.GateResult] = []
-        fits_wo = None
 
         def safe(name, fn):
             try:
@@ -853,18 +852,12 @@ class Campaign:
         active = np.unique(an.levels[mask])
 
         def g4():
-            nonlocal fits_wo
-            if len(active) < 4:  # removing the coarsest level must leave at least 3 levels
-                return gates.GateResult("G4", "not testable", {"reason": f"{len(active)} levels (< 4)"})
-            data_wo = dataclasses.replace(data, mask=mask & (an.levels > int(active.min())))
-            fits_wo = self._fit_all(data_wo, jax.random.fold_in(key, 91), **self._refit_kw(fits))
-            mom = self._moments(fits_wo, data_wo, self.problem.sigma_n)
-            d, w = self._pool(fits_wo, an.weights, mom, jax.random.fold_in(key, 92))
-            m_wo = np.asarray(predict.weighted_quantile(d, w, 0.5))
-            sig_wo = np.asarray(
-                acq.sigma_epi_physical(self._weighted(fits_wo, an.weights), data_wo, self.problem.sigma_n)
-            )
-            return gates.g4_pre_asymptotic(an.m_y, an.sigma_epi, m_wo, sig_wo)
+            if len(active) < 2:
+                return gates.GateResult("G4", "not testable", {"reason": "one level"})
+            block = np.flatnonzero(mask & ~cens & (an.levels == int(active.min())))
+            idx = jnp.asarray(_thin_idx(int(ft.sp.z.shape[0]), G2_MAX_DRAWS))
+            params = jax.tree_util.tree_map(lambda a: a[idx], ft.sp.params)
+            return gates.g4_coarsest_level(params, data, ft.sp.z[idx], ft.cfg, block)
 
         out.append(safe("G4", g4))
         # G5
@@ -877,7 +870,7 @@ class Campaign:
 
         out.append(safe("G6", g6))
         out.append(safe("G7", lambda: self._g7(an, key)))
-        return out, fits_wo
+        return out, None
 
     def _g5(self, an: _Analysis):
         if self.settings.monotone is None:
@@ -1523,15 +1516,18 @@ def oracle_values(
     truth, campaign: Campaign, candidates, n_refit_draws: int, key=None, source: str = "model",
     se_target: float | None = None, n_max: int | None = None, H_base: float | None = None,
     max_h_ratio: float = 10.0, warm: bool = False, paired: bool = False, refit_warmup: int | None = None,
+    max_rhat: float | None = None,
 ):  # fmt: skip
     """See synthetic.a12_oracle_ranking. Imported lazily by it so that campaign does not import synthetic.
 
     n_refit_draws fantasies per candidate; with ``se_target`` the number grows (doubling, up to ``n_max``)
     until the Monte Carlo s.e. of the mean gain is below se_target x the mean gain. ``H_base`` replaces H
-    of the current posterior as the reference (e.g. the mean over refits of the unchanged data, which removes
-    the refit's own Monte Carlo bias from the gain). A refit whose H_after exceeds ``max_h_ratio`` x the
-    reference is a divergent fit (seen once, with H ~ 1e51, in 60 refits): it is counted in ``n_discarded``
-    and left out of the mean, and the raw gains are returned for any other treatment. [assumption]
+    of the current posterior as the reference (e.g. the mean over refits of the unchanged data).
+
+    A fantasy is DROPPED from the mean (and counted) when (a) a refit has rhat(log p0) > ``max_rhat``
+    (default: no filter), or (b) its gain is divergent: |gain| > (max_h_ratio - 1) x |H_ref| on EITHER side
+    (a divergent refit of the fantasy gives a huge negative gain, a divergent reference refit a huge positive
+    one; seen at H ~ 1e51). The raw gains and rhats of every fantasy are returned. [assumption]
 
     ``warm``: every refit starts at the base posterior (``refit_warmup`` warm-up iterations).
     ``paired``: the gain of fantasy number j is H(refit of the unchanged data) - H(refit with the fantasy),
@@ -1555,16 +1551,23 @@ def oracle_values(
                 if paired:
                     kj = jax.random.fold_in(key, 888000 + n_drawn)
                     if n_drawn not in refs:
-                        refs[n_drawn] = refit_H(campaign, an, campaign.dataset, kj, warm, refit_warmup)[0]
-                    H_ref = refs[n_drawn]
+                        refs[n_drawn] = refit_H(campaign, an, campaign.dataset, kj, warm, refit_warmup)
+                    H_ref, rh_ref = refs[n_drawn]
                 else:
-                    kj, H_ref = jax.random.fold_in(kf, 9), H_now
+                    kj, H_ref, rh_ref = jax.random.fold_in(kf, 9), H_now, 0.0
                 H_after, rh = refit_H(campaign, an, ds, kj, warm, refit_warmup)
                 n_drawn += 1
                 gains.append(H_ref - H_after)
-                rhats.append(rh)
-            raw = np.asarray(gains)
-            g = raw[np.isfinite(raw) & (raw > -(max_h_ratio - 1.0) * abs(H_now))]
+                rhats.append(max(rh, rh_ref))
+            raw, rh_all = np.asarray(gains), np.asarray(rhats)
+            ok = np.isfinite(raw) & (np.abs(raw) <= (max_h_ratio - 1.0) * abs(H_now))
+            n_div = int(np.sum(~ok))
+            if max_rhat is not None:
+                n_rhat = int(np.sum(ok & (rh_all > max_rhat)))
+                ok &= rh_all <= max_rhat
+            else:
+                n_rhat = 0
+            g = raw[ok]
             se = float(g.std(ddof=1) / np.sqrt(len(g))) if len(g) > 1 else float("inf")
             rel = se / abs(g.mean()) if len(g) and g.mean() != 0 else float("inf")
             if se_target is None or rel < se_target or n_drawn >= (n_max or n_drawn):
@@ -1573,7 +1576,8 @@ def oracle_values(
         out.append(
             OracleRank(
                 i, float(g.mean() / cand.cost_mean), float(g.mean()), se / cand.cost_mean, len(g), rel,
-                max(rhats), tuple(float(x) for x in raw), tuple(float(x) for x in rhats), n_drawn - len(g),
+                float(rh_all.max()), tuple(float(x) for x in raw), tuple(float(x) for x in rh_all),
+                n_div, n_rhat,
             )
         )  # fmt: skip
     return sorted(out, key=lambda t: -t.value)

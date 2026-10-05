@@ -39,9 +39,9 @@ g3_noise(groups: list of arrays of Lambda(y) of runs at the same site, s2_mean p
     T = sum_g sum_r (x_gr - xbar_g)^2 / s2_g ~ chi-square(sum_g (n_g - 1)) for fixed s2 and Gaussian noise;
     pass if the TWO-SIDED p = 2 min(cdf, sf) > 0.05 [assumption: two-sided]; "not testable" without
     replicates (no group with n_g >= 2). s2_mean is the posterior mean of the group's s^2, used as a plug-in.
-g4_pre_asymptotic(m_full (s,), sigma_epi_full (s,), m_without_coarsest (s,) or None, sigma_epi_without (s,))
-    z = dm / sqrt(max(sigma_w^2 - sigma_f^2, (0.1 sigma_f)^2)); "fail" if > 10% of Sigma_N has |z| > 2.5,
-    with the advice "remove the coarsest level". None (nothing to remove) -> "not testable".
+g4_coarsest_level(params, data, z, cfg, block, w=None, alpha=0.01) posterior-predictive check of the
+    coarsest level: closed-form block LOO of all its runs per draw of the main fit, pooled by moments,
+    whitened, chi-square upper tail p > alpha; no refit. stats: statistic, dof, p, z_whitened; advice.
 g5_monotone(median_curve (s,), direction, tol=0.0) no violation along a declared monotone coordinate (the
     curve is ordered along it); direction "increasing" | "decreasing" (or +1 | -1); None -> "not testable".
 g6_shape(draws (S, s) physical, w) median over x of max(|q025 - (m - 1.96 sigma)|, |q975 - (m + 1.96 sigma)|)
@@ -310,33 +310,41 @@ def g3_noise(groups, s2_mean, *, alpha: float = 0.05) -> GateResult:
 # ----------------------------------------------------------------------------------------------
 
 
-def g4_pre_asymptotic(
-    m_full,
-    sigma_epi_full,
-    m_without_coarsest,
-    sigma_epi_without=None,
-    *,
-    z_max: float = 2.5,
-    frac_max: float = 0.1,
-    floor: float = 0.1,
-) -> GateResult:
-    """z = dm / sqrt(max(sigma_w^2 - sigma_f^2, (floor sigma_f)^2)) at every x of Sigma_N (spec Step 3, G4).
+def g4_coarsest_level(params, data, z, cfg, block, w=None, *, alpha: float = 0.01) -> GateResult:
+    """Posterior-predictive check of the coarsest level (spec Step 3, G4); no refit.
 
-    Under the model, adding data changes a posterior mean by a quantity of variance sigma_w^2 - sigma_f^2
-    (w: without the coarsest level, f: full). Fail if more than ``frac_max`` of the points have |z| > z_max.
-    ``sigma_epi_without=None`` is taken as sigma_f (only the floor sets the scale).
+    ``block`` = the rows of all runs of the coarsest level. For every posterior draw of the MAIN fit, the
+    closed-form block LOO (block_loo) gives the predictive of those rows given all the other data (noise
+    included); the draws are pooled by their first two moments (as in G2), the residuals are whitened with
+    the Cholesky factor of the pooled covariance, and the sum of squares is compared with chi-square(N), N the
+    number of rows: pass if the upper-tail p > alpha (0.01). A pre-asymptotic level has residuals that are
+    too large, so the upper tail is the test. On a fail the advice is
+    "remove the coarsest level" (the caller removes it only while at least 3 levels remain).
+    stats: statistic, dof, p, z_whitened.
     """
-    if m_without_coarsest is None:
-        return GateResult("G4", "not testable", dict(reason="no level can be removed"))
-    sf = np.asarray(sigma_epi_full, float)
-    sw = sf if sigma_epi_without is None else np.asarray(sigma_epi_without, float)
-    dm = np.asarray(m_without_coarsest, float) - np.asarray(m_full, float)
-    z = dm / np.sqrt(np.maximum(sw**2 - sf**2, (floor * sf) ** 2))
-    frac = float(np.mean(np.abs(z) > z_max))
-    ok = frac <= frac_max
-    st = dict(
-        z=z, max_abs_z=float(np.max(np.abs(z))), frac_exceed=frac, n_violations=int(np.sum(np.abs(z) > z_max))
+    block = np.asarray(block, dtype=int)
+    if block.size == 0:
+        return GateResult("G4", "not testable", dict(reason="no runs at the coarsest level"))
+    z = jnp.asarray(z, dtype=float)
+    S = z.shape[0]
+    w = (
+        jnp.full(S, 1.0 / S)
+        if w is None
+        else jnp.asarray(w, dtype=float) / jnp.sum(jnp.asarray(w, dtype=float))
     )
+    z_obs = jnp.sum(w[:, None] * z, axis=0)
+    per_draw = jax.jit(jax.vmap(lambda p, zz: block_loo(p, data, zz, cfg, block), in_axes=(0, 0)))
+    ms, Cs = per_draw(params, z)
+    mbar = jnp.sum(w[:, None] * ms, axis=0)
+    d = ms - mbar[None, :]
+    C = jnp.sum(w[:, None, None] * Cs, axis=0) + jnp.einsum("s,si,sj->ij", w, d, d)
+    C = 0.5 * (C + C.T)
+    L = jnp.linalg.cholesky(C)
+    e = np.asarray(jax.scipy.linalg.solve_triangular(L, z_obs[block] - mbar, lower=True))
+    stat = float(e @ e)
+    p = float(sps.chi2.sf(stat, e.size))
+    ok = bool(np.isfinite(stat) and p > alpha)
+    st = dict(statistic=stat, dof=int(e.size), p=p, z_whitened=e)
     if not ok:
         st["advice"] = "remove the coarsest level"
     return GateResult("G4", _status(ok), st)

@@ -588,3 +588,19 @@ def test_infinite_or_nan_gains_do_not_warn_and_do_not_win(monkeypatch):
     monkeypatch.setattr(acq, "_gain_samples", fake)
     chosen, table = acq.select_batch(jax.random.key(0), structs, data, cands, XS, 0.01, 1, 1e9, max_draws=8)
     assert not np.any(np.isnan(table.ratio[table.admissible]))
+
+
+def test_integrated_mode_is_the_sum_of_squared_ratios_with_no_hinge_and_gives_gains_when_p1_holds():
+    sig, eps = jnp.array([0.1, 0.5, 3.0]), jnp.array([1.0, 1.0, 2.0])
+    np.testing.assert_allclose(float(acq.H_value(sig, eps, mode="integrated")), 0.01 + 0.25 + 2.25)
+    # P1 holds (every sigma <= eps): the hinge H is 0 and no probe has a gain; the integrated H still does
+    structs, data = world(plist=[make_params(24)])
+    s = np.asarray(acq.sigma_epi_physical(structs, data, XS))
+    big_eps = float(10 * s.max())
+    cands = [cand(0.2, 0.5), cand(0.5, 0.5), cand(0.8, 0.5)]
+    _, hinge = acq.select_batch(jax.random.key(0), structs, data, cands, XS, big_eps, 1, 1e9, max_draws=8)
+    _, integ = acq.select_batch(
+        jax.random.key(0), structs, data, cands, XS, big_eps, 1, 1e9, mode="integrated", max_draws=8
+    )
+    assert np.all(np.asarray(hinge.gain) == 0.0)
+    assert np.all(np.asarray(integ.gain) > 0.0)

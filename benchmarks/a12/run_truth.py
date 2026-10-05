@@ -58,6 +58,7 @@ def run(args) -> dict:
         seed=args.seed + 1000,
     )
     c = A12Campaign(truth.problem(), SCALES, COST_PRIOR, settings)
+    c.mode = "integrated"  # A12 v3: H = sum sigma_epi^2 / eps^2, no hinge (acquisition and oracle)
     probes = c.initial_design()
     o = truth.oracle(seed=args.seed)
     o.submit(probes, [c.cap_of(p) for p in probes])
@@ -85,7 +86,7 @@ def run(args) -> dict:
     ranking = oracle_values(
         truth, c, cands, args.n_min, key=jax.random.PRNGKey(args.seed + 5),
         se_target=args.se_target, n_max=args.n_max, H_base=h_base, warm=args.warm, paired=args.paired,
-        refit_warmup=args.refit_warmup,
+        refit_warmup=args.refit_warmup, max_rhat=args.max_rhat,
     )  # fmt: skip
     by_idx = {r.index: r for r in ranking}
     rows = []
@@ -98,7 +99,7 @@ def run(args) -> dict:
                 acq_ratio=float(tab.ratio[i]), oracle_gain=r.gain, oracle_value=r.value,
                 oracle_gain_se=r.se * float(cands[k].cost_mean), n_fantasies=r.n, rel_se=r.rel_se,
                 rhat_p0=r.rhat_p0, raw_gains=list(r.raw_gains), raw_rhats=list(r.raw_rhats),
-                n_discarded=r.n_discarded,
+                n_discarded=r.n_discarded, n_rhat_dropped=r.n_rhat_dropped,
             )
         )  # fmt: skip
     out = dict(
@@ -122,7 +123,8 @@ def main(argv=None) -> None:
     ap.add_argument("--n-u", type=int, default=16)
     ap.add_argument("--max-draws", type=int, default=64)
     ap.add_argument("--n-base", type=int, default=3)
-    ap.add_argument("--refit-warmup", type=int, default=150)
+    ap.add_argument("--refit-warmup", type=int, default=400)
+    ap.add_argument("--max-rhat", type=float, default=1.05)
     ap.add_argument("--paired", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--warm", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--n-min", type=int, default=12)

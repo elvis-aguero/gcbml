@@ -24,28 +24,9 @@ def main(argv=None) -> int:
     ap.add_argument("dir")
     ap.add_argument("--n", type=int, default=20)
     ap.add_argument("--need", type=int, default=16)
-    ap.add_argument(
-        "--symmetric",
-        action="store_true",
-        help="re-derive each candidate's mean gain and s.e. from the raw per-fantasy gains, discarding "
-        "fantasies with |gain| > 9 H_now on EITHER side (a divergent REFERENCE refit also gives a huge "
-        "positive gain; the stored rule only caught a divergent fantasy refit). Supplementary.",
-    )
     args = ap.parse_args(argv)
     files = sorted(Path(args.dir).glob("truth_*.json"), key=lambda p: int(p.stem.split("_")[1]))
     res = [json.loads(f.read_text()) for f in files]
-    if args.symmetric:
-        for r in res:
-            for x in r["candidates"]:
-                g = np.asarray(x["raw_gains"])
-                keep = np.isfinite(g) & (np.abs(g) <= 9.0 * abs(r["H_now"]))
-                g = g[keep]
-                x["n_discarded"] = len(x["raw_gains"]) - len(g)
-                x["n_fantasies"] = len(g)
-                x["oracle_gain"] = float(g.mean())
-                x["oracle_value"] = x["oracle_gain"] / x["cost_mean"]
-                se = float(g.std(ddof=1) / np.sqrt(len(g)))
-                x["rel_se"] = se / abs(g.mean()) if g.mean() != 0 else float("inf")
     print(f"{len(res)} of {args.n} truths found")
     hdr = (
         "seed   p   choice_lvl oracle_best_lvl regret  | gain acq/oracle per level 0..4 "
@@ -86,9 +67,11 @@ def main(argv=None) -> int:
     rh = [x["rhat_p0"] for r in res for x in r["candidates"] if np.isfinite(x["rhat_p0"])]
     base = [r["rhat_p0_base"] for r in res if np.isfinite(r["rhat_p0_base"])]
     nd = sum(x.get("n_discarded", 0) for r in res for x in r["candidates"])
+    nr = sum(x.get("n_rhat_dropped", 0) for r in res for x in r["candidates"])
     nf = sum(x["n_fantasies"] + x.get("n_discarded", 0) for r in res for x in r["candidates"])
     print(f"rhat(log p0): max over refits {max(rh):.3f}; base {max(base) if base else float('nan'):.3f}")
-    print(f"divergent refits discarded: {nd} of {nf} fantasies ({100 * nd / max(nf, 1):.2f}%)")
+    print(f"fantasies dropped for rhat(log p0) > 1.05: {nr}")
+    print(f"divergent fantasies discarded: {nd} of {nf} fantasies ({100 * nd / max(nf, 1):.2f}%)")
     se = [x["rel_se"] for r in res for x in r["candidates"]]
     print(
         f"oracle rel s.e.: median {np.median(se):.2f}, max {max(se):.2f}; fantasies per candidate: "

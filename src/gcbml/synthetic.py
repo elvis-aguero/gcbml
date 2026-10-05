@@ -215,7 +215,8 @@ class OracleRank:
     rhat_p0: float = float("nan")  # worst rhat of log p0 over the refits
     raw_gains: tuple = ()  # H_ref - H_after of every refit, divergent ones included
     raw_rhats: tuple = ()  # rhat of log p0 of every refit
-    n_discarded: int = 0  # divergent refits left out of the mean (see campaign.oracle_values)
+    n_discarded: int = 0  # divergent fantasies left out of the mean (see campaign.oracle_values)
+    n_rhat_dropped: int = 0  # fantasies dropped because a refit had rhat(log p0) above the limit
 
 
 def a12_oracle_ranking(

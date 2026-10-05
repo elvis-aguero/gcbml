@@ -265,7 +265,11 @@ def H_value(sigma_epi, eps, mode: str = "hinge", beta: float = 20.0):
         return jnp.sum(jnp.maximum(r - 1.0, 0.0))
     if mode == "softmax":
         return logsumexp(beta * r) / beta
-    raise ValueError(f"mode must be 'hinge' or 'softmax', got {mode!r}")
+    if (
+        mode == "integrated"
+    ):  # sum_x sigma_epi^2 / eps^2, no hinge: still informative when P1 holds (A12 test)
+        return jnp.sum(r)
+    raise ValueError(f"mode must be 'hinge', 'softmax' or 'integrated', got {mode!r}")
 
 
 # ----------------------------------------------------------------------------------------------
