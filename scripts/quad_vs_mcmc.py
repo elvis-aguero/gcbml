@@ -82,7 +82,14 @@ def make_dataset(i: int):
     zeta_row = np.asarray(st["zeta"])[np.asarray(smp.aux.row_site)][: len(X)]
     y, mu_true = ti.simulate(rng, T, X, H, Xs, zeta_row=zeta_row)
     data, zp = ti.pad(X, H, y)
-    return data, zp, Xs, mu_true, f"prior draw p={T['p0'][0]:.2f} sd_noise={np.exp(0.5 * T['m_s']):.3f}", n_levels
+    return (
+        data,
+        zp,
+        Xs,
+        mu_true,
+        f"prior draw p={T['p0'][0]:.2f} sd_noise={np.exp(0.5 * T['m_s']):.3f}",
+        n_levels,
+    )
 
 
 def run_mcmc(data, zp, Xs, key):
@@ -158,7 +165,11 @@ def run_dataset(i: int, out: Path):
         median_change_40_over_sigma=float(np.max(np.abs(med40 - med_q) / sig_q)),
     )  # fmt: skip
     res["x"] = dict(
-        f0=f0.tolist(), m_mcmc=med_mc.tolist(), s_mcmc=sig_mc.tolist(), m_quad=med_q.tolist(), s_quad=sig_q.tolist()
+        f0=f0.tolist(),
+        m_mcmc=med_mc.tolist(),
+        s_mcmc=sig_mc.tolist(),
+        m_quad=med_q.tolist(),
+        s_quad=sig_q.tolist(),
     )
     res["posterior_logp"] = dict(
         mcmc_sd=float(logp.std()), mcmc_mean=float(logp.mean()),

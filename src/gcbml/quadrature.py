@@ -232,9 +232,32 @@ def _solve_grid(prob, vg, aux, grid, u, maxiter):
         u = res.x
         us.append(res.x)
         vals.append(-float(res.fun))
-        ok.append(bool(res.success))
+        ok.append(bool(res.success) or float(np.linalg.norm(res.jac)) < 1e-3)  # ABNORMAL at a flat end counts
         n_evals += int(res.nfev)
     return us, np.asarray(vals), ok, n_evals
+
+
+def _solve_best(prob, vg, aux, grid, u, maxiter, multistart):
+    """_solve_grid; with ``multistart`` also a downward sweep and a fresh start (prior median) at every node,
+    keeping the best optimum per node. The profile in phi has several local optima (found on A12 data: node
+    values differ by up to 2.5 in log weight between the upward sweep, the downward sweep and a
+    fresh start)."""
+    us, vals, ok, ne = _solve_grid(prob, vg, aux, grid, u, maxiter)
+    if not multistart:
+        return us, vals, ok, ne
+    vals = np.array(vals)
+    us, ok = list(us), list(ok)
+    dn = _solve_grid(prob, vg, aux, grid[::-1], us[-1], maxiter)
+    ne += dn[3]
+    cands = [(dn[0][::-1], dn[1][::-1], dn[2][::-1])]
+    fresh = [_solve_grid(prob, vg, aux, g[None], prob.initial(), maxiter) for g in grid]
+    ne += sum(f[3] for f in fresh)
+    cands.append(([f[0][0] for f in fresh], np.array([f[1][0] for f in fresh]), [f[2][0] for f in fresh]))
+    for cu, cv, co in cands:
+        for i in range(len(grid)):
+            if cv[i] > vals[i]:
+                us[i], vals[i], ok[i] = cu[i], cv[i], co[i]
+    return us, vals, ok, ne
 
 
 def _softmax(vals):
@@ -259,6 +282,7 @@ def fit_quadrature(
     mass2: float = 0.999,
     n_extend: int = 10,
     max_extensions: int = 5,
+    multistart: bool = False,
 ) -> QuadPosterior:
     """p-quadrature posterior (module docstring). ``grid`` (K, k) of log p0 replaces the default grid.
 
@@ -266,7 +290,9 @@ def fit_quadrature(
     one edge node (k = 1), the grid is extended by ``n_extend`` nodes beyond that edge (same spacing, at most
     ``max_extensions`` times). Pass 2: ``n_grid2`` (default n_grid) nodes evenly spaced over the range that
     holds the central ``mass2`` of the pass-1 weight (per axis, from the marginal weights), widened by one
-    pass-1 spacing on each side; the output weights come from pass 2 only. ``two_pass=False`` or an explicit
+    pass-1 spacing on each side; the output weights come from pass 2 only. ``multistart=True`` adds
+    a downward sweep and a fresh prior-median start per node and keeps the best
+    optimum (default False: the literal single upward sweep of the brief). ``two_pass=False`` or an explicit
     ``grid`` gives a single pass. The pass-1 summary is in ``post.pass1`` (grid, weights, n_extensions).
     """
     del key, bounds
@@ -282,7 +308,7 @@ def fit_quadrature(
     vg = _value_and_grad(prob)
     aux = sampler.aux
     u0 = prob.initial()
-    us, vals, ok, n_evals = _solve_grid(prob, vg, aux, grid, u0, maxiter)
+    us, vals, ok, n_evals = _solve_best(prob, vg, aux, grid, u0, maxiter, multistart)
     info = {"n_extensions": 0, "pass1_grid": grid, "pass1_weights": _softmax(vals)}
     if two_pass and not explicit:
         if k == 1:
@@ -319,7 +345,7 @@ def fit_quadrature(
         grid2 = _snake(axes)
         j0 = int(np.argmin(np.sum((np.asarray(grid) - grid2[0]) ** 2, axis=1)))  # nearest pass-1 optimum
         n_evals1 = n_evals
-        us, vals, ok, ne = _solve_grid(prob, vg, aux, grid2, us[j0], maxiter)
+        us, vals, ok, ne = _solve_best(prob, vg, aux, grid2, us[j0], maxiter, multistart)
         n_evals = n_evals1 + ne
         grid = grid2
     w = _softmax(vals)
