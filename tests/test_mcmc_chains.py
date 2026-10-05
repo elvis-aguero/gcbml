@@ -1,11 +1,14 @@
 """Running chains in parallel (spec Section 2.5): vmap over chains, scan over iterations."""
 
+import ctypes
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 import gcbml  # noqa: F401  (float64)
+from gcbml.mcmc import chains
 from gcbml.mcmc import diagnostics as dg
 from gcbml.mcmc.chains import adapt_widths, run_chains
 from gcbml.mcmc.slice import slice_step
@@ -131,14 +134,14 @@ def test_warmup_and_sampling_share_one_compilation():
     assert res.samples.shape == (4, 50, 2)
 
 
-def test_chains_run_on_several_devices_when_available():
-    import gcbml.mcmc.chains as ch
-
-    f = ch.map_chains(lambda x: x * 2.0, 4)
-    np.testing.assert_array_equal(
-        jax.jit(f)(jnp.arange(8.0).reshape(4, 2)), 2.0 * np.arange(8.0).reshape(4, 2)
-    )
-    assert (ch.chain_mesh(4) is None) == (len(jax.devices()) == 1)
+@pytest.mark.parametrize("scheme", ["threads", "vmap", "shard"])
+def test_chain_map_applies_fn_per_chain_and_passes_shared_arguments(scheme, monkeypatch):
+    monkeypatch.setenv("GCBML_CHAIN_SCHEME", scheme)
+    f = chains.chain_map(lambda x, s: x * s, 4, 1)
+    x = jnp.arange(8.0).reshape(4, 2)
+    np.testing.assert_array_equal(f(x, 2.0), 2.0 * np.arange(8.0).reshape(4, 2))
+    np.testing.assert_array_equal(jax.jit(f)(x, 2.0), 2.0 * np.arange(8.0).reshape(4, 2))  # traced: vmap
+    assert (chains.chain_mesh(4) is None) == (len(jax.devices()) == 1)
 
 
 def test_run_chains_with_zero_warmup_keeps_initial_widths():
@@ -168,3 +171,54 @@ def test_run_chains_and_diagnostics_converge_on_correlated_gaussian():
     assert dg.converged(summ), summ
     np.testing.assert_allclose(x.reshape(-1, d).mean(axis=0), 0.0, atol=0.15)
     np.testing.assert_allclose(np.cov(x.reshape(-1, d).T), cov, atol=0.1)
+
+
+def _blas_threads():
+    """Thread counts of every OpenBLAS loaded in the process, read through its C interface."""
+    counts = []
+    for lib in chains._openblas_handles():
+        for pre in ("scipy_openblas", "openblas"):
+            get = getattr(lib, f"{pre}_get_num_threads", None)
+            if get is not None:
+                get.restype = ctypes.c_int
+                counts.append(get())
+                break
+    return counts
+
+
+def test_single_threaded_blas_limits_threads_inside_and_restores_after_nesting_and_errors():
+    jax.block_until_ready(jnp.linalg.cholesky(jnp.eye(4) * 2.0))  # make sure jaxlib's BLAS is loaded
+    before = _blas_threads()
+    if not before:
+        pytest.skip("no OpenBLAS found in this process")
+    with chains.single_threaded_blas():
+        assert set(_blas_threads()) == {1}
+        with chains.single_threaded_blas():
+            assert set(_blas_threads()) == {1}
+        assert set(_blas_threads()) == {1}  # the inner exit must not restore early
+    assert _blas_threads() == before
+    with pytest.raises(RuntimeError):
+        with chains.single_threaded_blas():
+            raise RuntimeError("boom")
+    assert _blas_threads() == before
+
+
+@pytest.mark.parametrize("scheme", ["threads", "vmap", "shard"])
+def test_every_chain_scheme_is_reproducible_restores_blas_and_agrees_with_vmap(scheme, monkeypatch):
+    jax.block_until_ready(jnp.linalg.cholesky(jnp.eye(4) * 2.0))
+    before = _blas_threads()
+    init = 1.0 + jax.random.normal(jax.random.key(0), (4, 2))
+    monkeypatch.setenv("GCBML_CHAIN_SCHEME", scheme)
+    a = run_chains(jax.random.key(3), init, gaussian_make_step, jnp.ones(2), 30, 40)
+    b = run_chains(jax.random.key(3), init, gaussian_make_step, jnp.ones(2), 30, 40)
+    np.testing.assert_array_equal(a.samples, b.samples)
+    assert _blas_threads() == before
+    monkeypatch.setenv("GCBML_CHAIN_SCHEME", "vmap")
+    ref = run_chains(jax.random.key(3), init, gaussian_make_step, jnp.ones(2), 30, 40)
+    np.testing.assert_allclose(a.samples, ref.samples, rtol=1e-9, atol=1e-9)
+
+
+def test_unknown_chain_scheme_is_rejected(monkeypatch):
+    monkeypatch.setenv("GCBML_CHAIN_SCHEME", "nope")
+    with pytest.raises(ValueError, match="GCBML_CHAIN_SCHEME"):
+        chains.chain_scheme()

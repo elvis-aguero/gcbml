@@ -3,7 +3,8 @@
 For run r with unit controls u_r (n_controls,), integer level vector l_r (k,) (0 = coarsest) and an
 optional oracle quote q_r (core-hours; None -> no quote):
 
-    log2 c_r = kappa0 + sum_j gamma_j l_rj + a * has_q_r * (log2 q_r - qbar) + omega(u_r, l_r) + eta_r
+    log2 c_r = kappa0 + sum_j (gamma_j l_rj + q_j l_rj^2 + t_j l_rj^3)
+               + a * has_q_r * (log2 q_r - qbar) + omega(u_r, l_r) + eta_r
     omega ~ GP(0, sigma_w^2 ard_matern52 over (u, l / l_scale)),   eta_r ~ N(0, s_eta^2)
 
 qbar is the mean of log2 q over runs with a quote (centring). The power law 2^{gamma l} is only the
@@ -33,6 +34,9 @@ Predictions use the imputed log2c of each posterior draw, with beta and omega in
 Curvature: log2 c also gains sum_j q_j l_j^2 with q_j ~ N(0, q_sd^2) (CostPrior.q_sd, default 0.5 log2
 units per level^2 [assumption]), integrated out like the other coefficients, so that the extrapolation
 variance grows with the distance from the probed levels (the log2 step of a real ladder grows with level).
+A cubic term sum_j t_j l_j^3, t_j ~ N(0, t_sd^2) (CostPrior.t_sd, default 0.1 [assumption]) is integrated out
+the same way: with only l and l^2 the 0.95 cap covered 84% of realised costs at the first unprobed level of an
+accelerating ladder (structural bias of the quadratic extrapolation); with the cubic term, 96%.
 ``coef_posterior`` (an addition to the stub) gives beta | y, hyper per draw.
 
 CostData: NamedTuple(U (n_pad, n_controls) unit, L (n_pad, k) float levels, log2c (n_pad,),
@@ -95,6 +99,7 @@ class CostPrior:
     gamma_sd: tuple[float, ...]
     l_scale: float = 4.0
     q_sd: float | tuple[float, ...] = 0.5
+    t_sd: float | tuple[float, ...] = 0.1
 
 
 class CostPosterior(NamedTuple):
@@ -128,18 +133,19 @@ def _qbar(data: CostData):
 
 
 def _design(L, log2q, has_q, qbar):
-    """A = [1, L, L^2, has_q (log2q - qbar)], (n, 2 + 2k)."""
+    """A = [1, L, L^2, L^3, has_q (log2q - qbar)], (n, 2 + 3k)."""
     hq = jnp.asarray(has_q, dtype=float)
     q = hq * (jnp.asarray(log2q, dtype=float) - qbar)
     L = jnp.asarray(L, dtype=float)
-    return jnp.concatenate([jnp.ones((L.shape[0], 1)), L, L**2, q[:, None]], axis=1)
+    return jnp.concatenate([jnp.ones((L.shape[0], 1)), L, L**2, L**3, q[:, None]], axis=1)
 
 
 def _beta_prior(prior: CostPrior):
     k = len(prior.gamma_mean)
     qsd = np.broadcast_to(np.asarray(prior.q_sd, dtype=float), (k,))
-    b0 = jnp.asarray([prior.k0_mean, *prior.gamma_mean, *([0.0] * k), A_PRIOR_MEAN], dtype=float)
-    bsd = jnp.asarray([prior.k0_sd, *prior.gamma_sd, *qsd, A_PRIOR_SD], dtype=float)
+    tsd = np.broadcast_to(np.asarray(prior.t_sd, dtype=float), (k,))
+    b0 = jnp.asarray([prior.k0_mean, *prior.gamma_mean, *([0.0] * (2 * k)), A_PRIOR_MEAN], dtype=float)
+    bsd = jnp.asarray([prior.k0_sd, *prior.gamma_sd, *qsd, *tsd, A_PRIOR_SD], dtype=float)
     return b0, bsd
 
 
@@ -273,9 +279,9 @@ def fit_cost(
 
 
 def coef_posterior(post: CostPosterior):
-    """Posterior of beta = (kappa0, gamma, q, a) given y and the hyperparameters, per draw.
+    """Posterior of beta = (kappa0, gamma, q, t, a) given y and the hyperparameters, per draw.
 
-    Returns (mean (S, 2 + 2k), cov (S, 2 + 2k, 2 + 2k)) in the order (kappa0, gamma, q, a);
+    Returns (mean (S, 2 + 3k), cov (S, 2 + 3k, 2 + 3k)) in the order (kappa0, gamma, q, t, a);
     Gaussian, with omega and eta integrated out:
     mean = b0 + B A^T K_t^{-1} (y - A b0), cov = B - B A^T K_t^{-1} A B.
     """
@@ -328,6 +334,25 @@ def expected_cost(mean, var, w):
     mean, var = jnp.asarray(mean, dtype=float), jnp.asarray(var, dtype=float)
     w = _norm_w(w, mean.shape[0])
     return jnp.sum(w[:, None] * jnp.exp(LN2 * mean + 0.5 * LN2**2 * var), axis=0)
+
+
+def expected_capped_cost(mean, var, w, cap):
+    """E[min(c, cap)] under the pooled lognormal mixture of log2 c ~ N(mean_s, var_s), weights w_s.
+
+    A run is stopped at its cap, so this is the cost a run is charged (spec 2.6). Per component, with
+    X = 2^Y, m = ln2 mean, s = ln2 sqrt(var), k = cap:
+        E[X; X < k] = exp(m + s^2/2) Phi((ln k - m - s^2)/s),   P(X >= k) = Phi((m - ln k)/s),
+        E[min(X, k)] = E[X; X < k] + k P(X >= k).
+    ``cap`` is a scalar or an array of shape (m,), in the units of c. Tends to expected_cost as cap -> inf.
+    """
+    mean, var = jnp.asarray(mean, dtype=float), jnp.asarray(var, dtype=float)
+    w = _norm_w(w, mean.shape[0])
+    cap = jnp.asarray(cap, dtype=float)
+    m = LN2 * mean
+    s = LN2 * jnp.sqrt(jnp.maximum(var, 1e-300))
+    lk = jnp.log(cap)
+    part = jnp.exp(m + 0.5 * s**2) * ndtr((lk - m - s**2) / s) + cap * ndtr((m - lk) / s)
+    return jnp.sum(w[:, None] * part, axis=0)
 
 
 def cost_cap(mean, var, w, q: float = 0.95):

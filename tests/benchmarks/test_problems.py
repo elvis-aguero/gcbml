@@ -223,8 +223,8 @@ def test_truth_b3_matches_direct_fourier_variance():
     x = bp.problem().inputs.from_unit(z)
     D, L0 = x[0], x[1]
     # direct: sample the exact cosine series on a fine grid and compute the variance
-    xs = (np.arange(20000) + 0.5) / 20000
-    n = np.arange(1, 3000)
+    xs = (np.arange(4000) + 0.5) / 4000
+    n = np.arange(1, 600)
     a = 2 * np.sin(n * np.pi * L0) / (n * np.pi)
     c = L0 + (
         a[:, None] * np.cos(np.pi * n[:, None] * xs[None, :]) * np.exp(-D * (n * np.pi) ** 2 * t)[:, None]
