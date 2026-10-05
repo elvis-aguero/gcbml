@@ -11,7 +11,7 @@
 8. **Interfaces are fixed.** Do not change a signature in a stub without the reviewer's approval. If an interface is wrong, say so in your report.
 
 ## Commands
-- Tests: `uv run pytest` (fast). `uv run pytest -m slow` for the statistical and benchmark tests (run them on a compute node).
+- Tests: `uv run pytest` (fast; runs in parallel with pytest-xdist, `-n auto`; the `slow` tests run nightly in CI). `uv run pytest -m slow` for the statistical and benchmark tests (run them on a compute node).
 - Lint: `uv run ruff check src tests` and `uv run ruff format --check src tests`.
 
 ## Style

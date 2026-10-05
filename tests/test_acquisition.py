@@ -148,7 +148,7 @@ def two_draw_world(transform="identity", cfg=CFG, c0s=(0.0, 1.5)):
     return world([make_params(24, c0=c) for c in c0s], cfg=cfg, transform=transform)
 
 
-def test_sigma_epi_two_component_mixture_matches_exact_cdf_and_sampling():
+def test_sigma_epi_two_component_mixture_matches_exact_cdf():
     structs, data = two_draw_world()
     m, v = per_draw_moments(structs, data, XS)
     assert np.abs(m[0] - m[1]).max() > 0.1  # the draws really disagree
@@ -156,6 +156,13 @@ def test_sigma_epi_two_component_mixture_matches_exact_cdf_and_sampling():
     got = np.asarray(acq.sigma_epi_physical(structs, data, XS))
     exact = mixture_halfwidth_brentq(m, np.sqrt(v), w)
     np.testing.assert_allclose(got, exact, rtol=1e-8)
+
+
+@pytest.mark.slow
+def test_sigma_epi_two_component_mixture_matches_sampling():
+    structs, data = two_draw_world()
+    m, v = per_draw_moments(structs, data, XS)
+    got = np.asarray(acq.sigma_epi_physical(structs, data, XS))
     rng = np.random.default_rng(0)
     N = 2_000_000
     pick = rng.integers(0, 2, size=N)
@@ -164,16 +171,27 @@ def test_sigma_epi_two_component_mixture_matches_exact_cdf_and_sampling():
     np.testing.assert_allclose(got, mc, rtol=3e-3)
 
 
-@pytest.mark.parametrize("name", ["log", "reciprocal"])
-def test_sigma_epi_log_and_reciprocal_match_inverse_transform_sampling(name):
+def _log_reciprocal_case(name):
     cfg = ModelConfig(h_kernel="twy2", beta_prior=((4.0,), (0.5,)), increasing=(name == "log"))
     structs, data = two_draw_world(transform=name, cfg=cfg, c0s=(0.0, 0.4))
     m, v = per_draw_moments(structs, data, XS)
     assert m.min() - 8 * np.sqrt(v.max()) > 0.5  # Lambda units well inside the domain
     got = np.asarray(acq.sigma_epi_physical(structs, data, XS))
     inv = np.exp if name == "log" else (lambda z: 1.0 / z)
+    return m, v, got, inv
+
+
+@pytest.mark.parametrize("name", ["log", "reciprocal"])
+def test_sigma_epi_log_and_reciprocal_match_the_exact_mixture_halfwidth(name):
+    m, v, got, inv = _log_reciprocal_case(name)
     exact = mixture_halfwidth_brentq(m, np.sqrt(v), np.array([0.5, 0.5]), inv)
     np.testing.assert_allclose(got, exact, rtol=1e-7)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", ["log", "reciprocal"])
+def test_sigma_epi_log_and_reciprocal_match_inverse_transform_sampling(name):
+    m, v, got, inv = _log_reciprocal_case(name)
     rng = np.random.default_rng(1)
     N = 2_000_000
     pick = rng.integers(0, 2, size=N)

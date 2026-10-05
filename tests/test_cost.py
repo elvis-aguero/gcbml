@@ -269,6 +269,7 @@ def test_omega_absorbs_a_bend_in_level_and_straight_line_is_biased():
 # ----------------------------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 def test_tobit_prediction_consistent_with_uncensored_naive_is_biased_low():
     rng = np.random.default_rng(4)
     sim = simulate(rng, 60, 1, gamma=(3.0,), sw=0.3, s_eta=0.3, l_max=4)
@@ -322,6 +323,7 @@ def _fit_quote_case(rng, log2q_fn, q_frac_fit=1.0, seed=0):
     return sim, prior
 
 
+@pytest.mark.slow
 def test_informative_quotes_give_a_near_one_and_shrink_predictive_variance():
     rng = np.random.default_rng(6)
 
