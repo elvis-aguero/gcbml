@@ -707,3 +707,18 @@ def test_g4_power_a_preasymptotic_coarsest_level_fails_in_most_seeds(amp, monkey
     with capsys.disabled():
         print(f"\nG4 v3 power, amplitude {amp}: {sum(fails)} fails of 10")
     assert sum(fails) >= 6, fails
+
+
+@pytest.mark.slow
+def test_parallel_fits_give_the_same_posteriors_as_serial_fits(monkeypatch):
+    t = A12Truth(2, d=1, budget=1e6)
+    c = make(t, dataclasses.replace(FAST, n_warmup=20, n_samples=20, n_chains=2, h_kernels=("twy2", "lb")))
+    run_initial(c, t)
+    data, _ = c._build_data()
+    monkeypatch.setattr(Campaign, "PARALLEL_FITS", True)
+    par = c._fit_all(data, jax.random.PRNGKey(4))
+    monkeypatch.setattr(Campaign, "PARALLEL_FITS", False)
+    ser = c._fit_all(data, jax.random.PRNGKey(4))
+    assert [f.name for f in par] == [f.name for f in ser] == ["twy2/identity", "lb/identity"]
+    for a, b in zip(par, ser, strict=True):
+        np.testing.assert_array_equal(a.post.theta["log_p0"], b.post.theta["log_p0"])

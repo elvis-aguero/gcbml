@@ -62,6 +62,7 @@ from __future__ import annotations
 import collections
 import copy
 import math
+import threading
 from typing import Any, NamedTuple
 
 import jax
@@ -503,6 +504,7 @@ class _Sampler:
 
 MAX_COMPILED = 4  # compiled programs kept alive (LRU); a campaign grows n_pad through ~10 buckets
 _COMPILED: collections.OrderedDict = collections.OrderedDict()
+_LOCK = threading.RLock()  # fits may run in several threads (campaign: independent fits of one ask)
 
 
 def _make_runner(template: _Sampler, n_warmup: int, n_samples: int, n_chains: int):
@@ -569,6 +571,11 @@ def _runner_for(sampler: _Sampler, n_warmup: int, n_samples: int, n_chains: int)
     """
     shapes = tuple(a.shape for a in sampler.aux)
     key = (_template_key(sampler), shapes, n_warmup, n_samples, n_chains)
+    with _LOCK:
+        return _runner_locked(sampler, key, n_warmup, n_samples, n_chains)
+
+
+def _runner_locked(sampler, key, n_warmup, n_samples, n_chains):
     hit = _COMPILED.get(key)
     if hit is None:
         hit = _make_runner(sampler, n_warmup, n_samples, n_chains)

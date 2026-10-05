@@ -72,6 +72,7 @@ import json
 import math
 import os
 import types
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -327,6 +328,7 @@ class Campaign:
     WARM_START = True  # start refits at the last posterior draws (inference.fit(init=...))
     WARM_FRACTION = 0.25  # warm-up of a warm-started fit = max(WARM_MIN, round(WARM_FRACTION * n_warmup))
     WARM_MIN = 40
+    PARALLEL_FITS = True  # independent fits of one ask run in threads (structures; main fit and hold-out)
 
     def __init__(
         self, problem: Problem, scales: PriorScales, cost_prior, settings: CampaignSettings | None = None,
@@ -564,14 +566,15 @@ class Campaign:
     # ------------------------------------------------------------------ Step 2: fits and weights
 
     def _fit_all(
-        self, data: PaddedData, key, skip_note: list | None = None, init: list | None = None,
+        self, data: PaddedData, key, skip_note: list | None = None, init: list | dict | None = None,
         n_warmup: int | None = None,
     ) -> list[_Fit]:  # fmt: skip
+        """Fit every structure (in parallel threads when PARALLEL_FITS: the fits are independent, each one
+        keyed by fold_in(key, i), so the result does not depend on the scheduling)."""
         s = self.settings
         n_warmup = s.n_warmup if n_warmup is None else n_warmup
         y = np.asarray(data.y, dtype=float)
-        fits = []
-        i = 0
+        jobs = []
         for hk in s.h_kernels:
             for tname in self.problem.transforms:
                 tf = transforms.get(tname)
@@ -581,31 +584,35 @@ class Campaign:
                             f"structure {hk}/{tname} dropped: outputs outside the transform domain"
                         )
                     continue
-                cfg = ModelConfig(h_kernel=hk, increasing=(tname != "reciprocal"))
-                z = np.asarray(tf.forward(jnp.asarray(y)))
                 name = f"{hk}/{tname}"
-                if isinstance(init, dict):
-                    ini = init.get(name)
-                else:
-                    ini = None if init is None else init[i]
-                post = inference.fit(
-                    jax.random.fold_in(key, i), data, z, z, cfg, self.scales, self._nc,
-                    n_warmup, s.n_samples, s.n_chains, s.varying_order,
-                    init=ini,
-                )  # fmt: skip
-                params, zs = inference.flatten(post)
-                idx = _thin_idx(int(zs.shape[0]), N_ACQ_DRAWS)
-                take = jnp.asarray(idx)
-                sp = StructurePosterior(
-                    jax.tree_util.tree_map(lambda a, take=take: a[take], params), zs[take], cfg, tf, 1.0
-                )
-                fits.append(_Fit(f"{hk}/{tname}", cfg, tf, post, sp, idx, params, zs))
-                i += 1
-        if not fits:
+                i = len(jobs)
+                ini = init.get(name) if isinstance(init, dict) else (None if init is None else init[i])
+                jobs.append((i, name, hk, tf, ini))
+        if not jobs:
             raise ValueError(
                 "no structure can be fitted: the outputs are outside the domain of every transform"
             )
-        return fits
+
+        def one(job):
+            i, name, hk, tf, ini = job
+            cfg = ModelConfig(h_kernel=hk, increasing=(tf.name != "reciprocal"))
+            z = np.asarray(tf.forward(jnp.asarray(y)))
+            post = inference.fit(
+                jax.random.fold_in(key, i), data, z, z, cfg, self.scales, self._nc,
+                n_warmup, s.n_samples, s.n_chains, s.varying_order, init=ini,
+            )  # fmt: skip
+            params, zs = inference.flatten(post)
+            idx = _thin_idx(int(zs.shape[0]), N_ACQ_DRAWS)
+            take = jnp.asarray(idx)
+            sp = StructurePosterior(
+                jax.tree_util.tree_map(lambda a, take=take: a[take], params), zs[take], cfg, tf, 1.0
+            )
+            return _Fit(name, cfg, tf, post, sp, idx, params, zs)
+
+        if self.PARALLEL_FITS and len(jobs) > 1:
+            with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+                return list(ex.map(one, jobs))
+        return [one(j) for j in jobs]
 
     def _moments(self, fits, data, Xs):
         X, H, run, mask = _arrays(data)
@@ -633,26 +640,37 @@ class Campaign:
         w = np.concatenate(ws)
         return np.concatenate(out), w / w.sum()
 
-    def _stacking(self, data, levels, fits, key):
-        """(weights, note, g1) of spec 2.7: cross-fitted extrapolation hold-out when testable, else equal."""
-        M = len(fits)
-        eq = np.full(M, 1.0 / M)
+    def _holdout_plan(self, data, levels, M: int):
+        """(train, rows, finest) of the extrapolation hold-out, or (None, None, reason) if not testable."""
         mask = np.asarray(data.mask, dtype=bool)
         active = np.unique(levels[mask])
         if M == 1:
-            return eq, "one structure", None
+            return None, None, "one structure"
         if len(active) < 4:
             return (
-                eq,
-                f"equal weights: {len(active)} levels (< 4), p is not identifiable after a hold-out",
                 None,
+                None,
+                f"equal weights: {len(active)} levels (< 4), p is not identifiable after a hold-out",
             )
         finest = int(active.max())
         train, rows = stacking.holdout(data, levels, finest)
         sites = np.unique(np.asarray(data.X)[rows], axis=0) if rows.size else np.zeros((0, 1))
         if len(sites) < MIN_SITES_HOLDOUT:
-            return eq, f"equal weights: {len(sites)} held-out sites (< {MIN_SITES_HOLDOUT})", None
-        fits_tr = self._fit_all(train, jax.random.fold_in(key, 77), **self._refit_kw(fits))
+            return None, None, f"equal weights: {len(sites)} held-out sites (< {MIN_SITES_HOLDOUT})"
+        return train, rows, finest
+
+    def _stacking(self, data, levels, fits, key, plan=None, fits_tr=None):
+        """(weights, note, g1) of spec 2.7: cross-fitted extrapolation hold-out when testable, else equal.
+
+        ``plan`` / ``fits_tr``: the hold-out plan and its fits when the caller already ran them (concurrently
+        with the main fit)."""
+        M = len(fits)
+        eq = np.full(M, 1.0 / M)
+        train, rows, finest = plan if plan is not None else self._holdout_plan(data, levels, M)
+        if train is None:
+            return eq, finest, None
+        if fits_tr is None:
+            fits_tr = self._fit_all(train, jax.random.fold_in(key, 77), **self._refit_kw(fits))
         sps = [f.sp for f in fits_tr]
         scores = stacking.log_scores(sps, train, rows)
         w = stacking.stack_weights(scores)
@@ -761,14 +779,22 @@ class Campaign:
         key = self._fit_key(0)
         skipped: list[str] = []
         warm = self._warm_inits()
-        fits = (
-            reuse
-            if reuse is not None
-            else self._fit_all(
-                data, key, skipped, init=warm, n_warmup=None if warm is None else self._warm_warmup()
-            )
-        )
-        weights, wnote, g1 = self._stacking(data, levels, fits, key)
+        kw_main = {} if warm is None else {"init": warm, "n_warmup": self._warm_warmup()}
+        plan = self._holdout_plan(data, levels, len(self.settings.h_kernels) * len(self.problem.transforms))
+        fits_tr = None
+        if reuse is not None:
+            fits = reuse
+        elif plan[0] is not None and self.PARALLEL_FITS:
+            # the main fit and the hold-out fit are independent (both start at the previous analysis' draws)
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_main = ex.submit(self._fit_all, data, key, skipped, **kw_main)
+                f_tr = ex.submit(self._fit_all, plan[0], jax.random.fold_in(key, 77), **kw_main)
+                fits, fits_tr = f_main.result(), f_tr.result()
+        else:
+            fits = self._fit_all(data, key, skipped, **kw_main)
+        if plan[0] is not None and len(fits) != len(self.settings.h_kernels) * len(self.problem.transforms):
+            plan, fits_tr = self._holdout_plan(data, levels, len(fits)), None  # a structure was dropped
+        weights, wnote, g1 = self._stacking(data, levels, fits, key, plan, fits_tr)
         structures = self._weighted(fits, weights)
         moments = self._moments(fits, data, Xs)
         draws, w = self._pool(fits, weights, moments, jax.random.fold_in(key, 5))
@@ -776,7 +802,7 @@ class Campaign:
         sigma = np.asarray(acq.sigma_epi_physical(structures, data, Xs))
         an = _Analysis(
             (len(self.dataset), self._min_level), data, levels, fits, weights, structures, m_y, sigma,
-            self._eps(m_y), moments, [], [], wnote, None, g1, skipped,
+            self._eps(m_y), moments, [], [], wnote, g1, skipped,
         )  # fmt: skip
         an.gates, _ = self._gates(an, key)
         return an
