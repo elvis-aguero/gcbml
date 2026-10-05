@@ -1,0 +1,52 @@
+rows n = 207, settings CampaignSettings(n_warmup=100, n_samples=100, n_chains=4, q=1, n0_per_control=50, n_replicate_sites=3, n_replicates=2, n_candidates_u=64, extra_levels=2, h_kernels=('twy2', 'lb'), varying_order=False, monotone=None, max_draws_acquisition=64, seed=1003)
+
+== cold ask(): total 769.5 s ==
+path                                                                   calls   incl s   excl s  excl %
+_analyse_once>_fit_all>fit                                                 2    244.4    244.4   31.8%
+_analyse_once>_stacking>_fit_all>fit                                       2    224.1    224.1   29.1%
+_analyse_once>_gates>_fit_all>fit                                          2    212.6    212.6   27.6%
+_repair_probe>_cost_posterior>fit_cost                                     1     18.3     18.3    2.4%
+_analyse_once>_gates>_g7                                                   1     16.1      9.9    1.3%
+_analyse_once>_gates>g2_block_loo                                          1      6.7      6.7    0.9%
+_repair_probe>_price>predict_log2                                          1      6.6      6.6    0.9%
+_analyse_once>_moments                                                     1      6.5      6.5    0.8%
+_analyse_once>_stacking>log_scores                                         1      6.4      6.4    0.8%
+_analyse_once>_gates>_g7>g7_prior                                          1      6.2      6.2    0.8%
+_analyse_once>sigma_epi_physical                                           1      5.8      5.8    0.8%
+_analyse_once>_stacking>_pit_components                                    1      5.4      5.4    0.7%
+_analyse_once>_gates>_moments                                              1      3.7      3.7    0.5%
+_analyse_once>_gates>sigma_epi_physical                                    1      3.3      3.3    0.4%
+_analyse_once                                                              1    742.3      1.7    0.2%
+_repair_probe>_price                                                       1      8.9      1.6    0.2%
+(untimed remainder)                                                                        0.0    0.0%
+
+== cold report() after ask: total 11.3 s ==
+path                                                                   calls   incl s   excl s  excl %
+_build_report>_sigma_fid                                                   4      8.6      8.6   76.1%
+_build_report                                                              1     11.3      2.5   22.4%
+_build_report>_pool                                                        1      0.2      0.2    1.5%
+(untimed remainder)                                                                        0.0    0.0%
+
+== warm ask(): total 781.8 s ==
+path                                                                   calls   incl s   excl s  excl %
+_analyse_once>_fit_all>fit                                                 2    259.1    259.1   33.1%
+_analyse_once>_stacking>_fit_all>fit                                       2    240.6    240.6   30.8%
+_analyse_once>_gates>_fit_all>fit                                          2    208.0    208.0   26.6%
+_repair_probe>_cost_posterior>fit_cost                                     1     16.1     16.1    2.1%
+_analyse_once>_gates>_g7                                                   1     11.6     10.8    1.4%
+_analyse_once>_gates>_moments                                              1     10.8     10.8    1.4%
+_analyse_once>_moments                                                     1      9.8      9.8    1.3%
+_analyse_once>_stacking>_pit_components                                    1      5.8      5.8    0.7%
+_analyse_once>_gates>g2_block_loo                                          1      4.8      4.8    0.6%
+_analyse_once>_stacking>log_scores                                         1      4.7      4.7    0.6%
+_analyse_once>_gates>sigma_epi_physical                                    1      3.5      3.5    0.5%
+_analyse_once>sigma_epi_physical                                           1      2.8      2.8    0.4%
+_repair_probe>_price>predict_log2                                          1      2.5      2.5    0.3%
+(untimed remainder)                                                                        0.0    0.0%
+
+== warm report() after ask: total 9.8 s ==
+path                                                                   calls   incl s   excl s  excl %
+_build_report>_sigma_fid                                                   4      9.4      9.4   95.6%
+_build_report                                                              1      9.8      0.4    3.8%
+_build_report>_pool                                                        1      0.1      0.1    0.6%
+(untimed remainder)                                                                        0.0    0.0%
