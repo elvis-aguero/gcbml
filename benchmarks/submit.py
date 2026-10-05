@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 
 from benchmarks import config
-from benchmarks.baselines import METHODS
+from benchmarks.baselines import METHODS, mfbml_usable
 from benchmarks.certificate import RESULTS
 from benchmarks.runner import result_path, results_root
 
@@ -26,32 +26,46 @@ MAX_CONCURRENT = 100
 SEEDS = tuple(range(1, 21))
 
 
-def all_tasks(mode: str) -> list[dict]:
+def usable_methods(methods=None) -> tuple[str, ...]:
+    """The requested methods; (b) is left out when mfbml cannot run in this environment."""
+    methods = tuple(methods or METHODS)
+    if "b" in methods:
+        ok, why = mfbml_usable()
+        if not ok:
+            print(f"warning: method b left out: {why}")
+            methods = tuple(m for m in methods if m != "b")
+    return methods
+
+
+def all_tasks(mode: str, methods=None) -> list[dict]:
+    methods = usable_methods(methods)
     if mode == "smoke":
-        return [{"problem": "b1_poisson", "kappa": config.KAPPAS[0], "method": m, "seed": 1} for m in METHODS]
+        return [{"problem": "b1_poisson", "kappa": config.KAPPAS[0], "method": m, "seed": 1} for m in methods]
     tasks = []
     for p in (*config.FEASIBLE, config.TRAP):
         kappas = config.KAPPAS if p != config.TRAP else (1.0,)
         for k in kappas:
-            for m in METHODS:
+            for m in methods:
                 tasks += [{"problem": p, "kappa": k, "method": m, "seed": s} for s in SEEDS]
     return tasks
 
 
-def pending_tasks(mode: str, root: Path | None = None) -> list[dict]:
+def pending_tasks(mode: str, root: Path | None = None, methods=None) -> list[dict]:
     r = results_root(mode == "smoke", root)
     return [
         t
-        for t in all_tasks(mode)
+        for t in all_tasks(mode, methods)
         if not result_path(r, t["problem"], t["kappa"], t["method"], t["seed"]).exists()
     ]
 
 
-def write_manifest(mode: str, root: Path | None = None) -> Path:
+def write_manifest(mode: str, root: Path | None = None, methods=None) -> Path:
     root = root or RESULTS
     root.mkdir(parents=True, exist_ok=True)
     path = root / f"manifest_{mode}.json"
-    path.write_text(json.dumps({"mode": mode, "fast": mode == "smoke", "tasks": pending_tasks(mode, root)}))
+    path.write_text(
+        json.dumps({"mode": mode, "fast": mode == "smoke", "tasks": pending_tasks(mode, root, methods)})
+    )
     return path
 
 
@@ -79,9 +93,10 @@ def main(argv=None) -> None:
     ap.add_argument("--mode", choices=("smoke", "full"), required=True)
     ap.add_argument("--time", default="12:00:00", help="wall time per task (from a measured run)")
     ap.add_argument("--mem", default="16G")
+    ap.add_argument("--methods", nargs="*", default=None, help="subset of gcbml a b c d e f")
     ap.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
-    manifest = write_manifest(a.mode)
+    manifest = write_manifest(a.mode, None, a.methods)
     n = len(json.loads(manifest.read_text())["tasks"])
     if n == 0:
         print("nothing to do: every task has a result")

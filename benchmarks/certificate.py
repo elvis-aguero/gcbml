@@ -167,6 +167,9 @@ def main(argv=None) -> None:
     ap.add_argument("--rel-tol", type=float, default=None)
     ap.add_argument("--stride", type=int, default=0, help="scan every k-th design of the cost order")
     a = ap.parse_args(argv)
+    from benchmarks.runner import enable_jax_cache
+
+    enable_jax_cache()
     settings = config.fast_settings() if a.fast else config.default_settings()
     st = certify(get_setup(a.problem, a.rel_tol), settings, a.fast, stride=a.stride)
     print(json.dumps(st["certificate"], indent=1))

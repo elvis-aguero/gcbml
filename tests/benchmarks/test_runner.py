@@ -57,7 +57,8 @@ def test_failure_leaves_an_error_file_and_no_result(tmp_path, monkeypatch):
     assert not p.exists() and p.with_suffix(".error.txt").exists()
 
 
-def test_manifest_counts_and_sbatch_script(tmp_path):
+def test_manifest_counts_and_sbatch_script(tmp_path, monkeypatch):
+    monkeypatch.setattr(submit, "mfbml_usable", lambda: (True, ""))
     full = submit.all_tasks("full")
     assert len(full) == (5 * 3 + 1) * 7 * 20
     assert {t["problem"] for t in full} == {
@@ -94,6 +95,13 @@ def test_smoke_end_to_end_with_gcbml_on_the_toy(tmp_path):
         "P2",
         "uncalibrated",
     }
+
+
+def test_method_b_is_left_out_when_mfbml_cannot_run(monkeypatch, capsys):
+    monkeypatch.setattr(submit, "mfbml_usable", lambda: (False, "numpy 2"))
+    ms = {t["method"] for t in submit.all_tasks("smoke")}
+    assert ms == {"gcbml", "a", "c", "d", "e", "f"} and "numpy 2" in capsys.readouterr().out
+    assert {t["method"] for t in submit.all_tasks("smoke", ["a", "b"])} == {"a"}
 
 
 def test_cli_reads_a_manifest(tmp_path, monkeypatch):
