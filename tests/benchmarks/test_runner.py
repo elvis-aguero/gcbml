@@ -14,17 +14,8 @@ C_STAR = 48.0
 def write_cert(root, fast=True):
     p = root / "certificates" / f"toy{'_fast' if fast else ''}.json"
     p.parent.mkdir(parents=True)
-    p.write_text(
-        json.dumps(
-            {
-                "problem": "toy",
-                "rel_tol": 0.5,
-                "fast": fast,
-                "certificate": {"C_star": C_STAR},
-                "evaluated": [],
-            }
-        )
-    )
+    e = {"design": [8, 2], "cost": C_STAR, "max_rel_sigma": 0.1, "inside2": 1.0, "coverage95": 1.0}
+    p.write_text(json.dumps({"problem": "toy", "fast": fast, "order": [[8, 2]], "evaluated": [e]}))
 
 
 def test_task_writes_one_json_with_the_protocol_fields_and_resumes(tmp_path, monkeypatch):
