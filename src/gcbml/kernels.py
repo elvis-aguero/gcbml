@@ -77,7 +77,8 @@ def ard_matern(X1: jnp.ndarray, X2: jnp.ndarray, ell: jnp.ndarray, nu: float) ->
     r2 = jnp.maximum(r2, 0.0)
     if X1 is X2:  # fused multiply-adds can break exact symmetry of r2: average it with its transpose
         r2 = 0.5 * (r2 + r2.T)
-    return matern(jnp.sqrt(r2), nu)
+    pos = r2 > 0  # sqrt has an infinite slope at 0: keep the gradient finite (0) on the diagonal
+    return matern(jnp.where(pos, jnp.sqrt(jnp.where(pos, r2, 1.0)), 0.0), nu)
 
 
 def _hpow(h, p):

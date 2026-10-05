@@ -75,6 +75,7 @@ class ModelConfig:
     within_run: bool = False  # S1: noise correlated within a run through ell_v over the v coordinates
     v_index: tuple[int, ...] = ()  # columns of X that are output coordinates v (S1)
     increasing: bool = True  # Lambda increasing (identity, log) or decreasing (reciprocal)
+    gamma_fixed: float | None = None  # "lb" only: pin gamma (0.5 = Brownian, Tuo-Wu-Yu); None = infer it
 
 
 class ModelParams(NamedTuple):

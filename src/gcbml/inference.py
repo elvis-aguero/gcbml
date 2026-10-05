@@ -135,7 +135,10 @@ class _Layout:
             ("log_sigma_delta", (k,)),
             ("log_ell_x", (k, d)),
         ]
-        fields.append(("log_ell_h", (k,)) if cfg.h_kernel == "twy2" else ("logit_gamma", (k,)))
+        if cfg.h_kernel == "twy2":
+            fields.append(("log_ell_h", (k,)))
+        elif cfg.gamma_fixed is None:
+            fields.append(("logit_gamma", (k,)))
         fields += [("m_s", ()), ("b_s", (k,))]
         if cfg.within_run:
             fields.append(("log_ell_v", ()))
@@ -245,7 +248,12 @@ class _Sampler:
             logp = logp + pi[:, a.x_row].T
         twy2 = self.cfg.h_kernel == "twy2"
         ell_h = jnp.exp(t["log_ell_h"]) if twy2 else jnp.ones(self.k)
-        gamma = jnp.full(self.k, 0.5) if twy2 else jax.nn.sigmoid(t["logit_gamma"])
+        if twy2:
+            gamma = jnp.full(self.k, 0.5)
+        elif self.cfg.gamma_fixed is not None:
+            gamma = jnp.full(self.k, float(self.cfg.gamma_fixed))
+        else:
+            gamma = jax.nn.sigmoid(t["logit_gamma"])
         delta = DeltaParams(jnp.exp(t["log_sigma_delta"]), jnp.exp(t["log_ell_x"]), ell_h, gamma)
         nv = noise.noise_var(t["m_s"], t["b_s"], zeta, a.sites, a.row_site, a.mask)
         ell_v = jnp.exp(t["log_ell_v"]) if self.cfg.within_run else jnp.ones(())
@@ -278,7 +286,7 @@ class _Sampler:
         )
         if self.cfg.h_kernel == "twy2":
             lp += lognormal_logpdf(t["log_ell_h"], math.log(0.5), 1.0)  # assumption (module docs)
-        else:
+        elif self.cfg.gamma_fixed is None:
             lp += logit_uniform_logpdf(t["logit_gamma"])
         lp += noise.log_prior(t["m_s"], t["b_s"], hz[0], hz[1:], sc)
         if self.cfg.within_run:
@@ -324,7 +332,7 @@ class _Sampler:
         t["log_sigma_delta"], t["log_ell_x"] = ls, le
         if self.cfg.h_kernel == "twy2":
             t["log_ell_h"] = math.log(0.5) + jax.random.normal(ks[5], (k,))
-        else:
+        elif self.cfg.gamma_fixed is None:
             u = jax.random.uniform(ks[5], (k,), minval=1e-12, maxval=1.0 - 1e-12)
             t["logit_gamma"] = jnp.log(u) - jnp.log1p(-u)
         t["m_s"] = 2.0 * math.log(sc.S_noise) + math.log(10.0) * jax.random.normal(ks[6])
