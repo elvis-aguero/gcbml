@@ -373,17 +373,34 @@ def test_g3_not_testable_without_replicates():
 # ----------------------------------------------------------------------------------------------
 
 
-def test_g4_pass_fail_and_not_testable():
-    m_full = np.array([1.0, 2.0, 3.0])
-    sig = np.array([0.5, 0.5, 0.5])
-    ok = gates.g4_pre_asymptotic(m_full, sig, np.array([1.2, 2.4, 3.0]))
-    assert ok.status == "pass" and ok.stats["max_ratio"] == pytest.approx(0.8)
-    bad = gates.g4_pre_asymptotic(m_full, sig, np.array([1.2, 2.6, 3.0]))
+def test_g4_z_uses_the_variance_of_the_change_of_the_mean():
+    n = 100
+    m_full = np.zeros(n)
+    sf = np.full(n, 0.5)
+    sw = np.full(n, 1.0)  # var of the change under the model: 1 - 0.25
+    sd = np.sqrt(0.75)
+    ok = gates.g4_pre_asymptotic(m_full, sf, np.full(n, 2.0 * sd), sw)  # |z| = 2 everywhere
+    assert ok.status == "pass" and ok.stats["frac_exceed"] == 0.0
+    assert ok.stats["max_abs_z"] == pytest.approx(2.0)
+    bad = gates.g4_pre_asymptotic(m_full, sf, np.full(n, 3.0 * sd), sw)  # |z| = 3 everywhere
     assert bad.status == "fail" and bad.stats["advice"] == "remove the coarsest level"
-    assert bad.stats["max_ratio"] == pytest.approx(1.2)
-    # equal to sigma_epi is not "less than"
-    assert gates.g4_pre_asymptotic(m_full, sig, np.array([1.5, 2, 3])).status == "fail"
-    assert gates.g4_pre_asymptotic(m_full, sig, None).status == "not testable"
+    # 10% of the points may exceed 2.5; 11% may not
+    m = np.zeros(n)
+    m[:10] = 3.0 * sd
+    assert gates.g4_pre_asymptotic(m_full, sf, m, sw).status == "pass"
+    m[:11] = 3.0 * sd
+    assert gates.g4_pre_asymptotic(m_full, sf, m, sw).status == "fail"
+    assert gates.g4_pre_asymptotic(m_full, sf, None, None).status == "not testable"
+
+
+def test_g4_denominator_is_floored_at_a_tenth_of_sigma_full():
+    n = 50
+    sf = np.full(n, 0.5)
+    # sigma_w == sigma_f: the model predicts no change; the floor (0.05) sets the scale
+    r = gates.g4_pre_asymptotic(np.zeros(n), sf, np.full(n, 0.1), sf)
+    assert r.stats["max_abs_z"] == pytest.approx(2.0)  # 0.1 / (0.1 * 0.5)
+    assert r.status == "pass"
+    assert gates.g4_pre_asymptotic(np.zeros(n), sf, np.full(n, 0.2), sf).status == "fail"  # z = 4
 
 
 def test_g5_monotone():
@@ -408,7 +425,7 @@ def test_g6_gaussian_draws_pass():
     r = gates.g6_shape(draws, np.full(60000, 1 / 60000))
     assert r.name == "G6" and r.status == "pass", r.stats
     # the 16/84 half-width of a Gaussian is 0.9945 sd, so the tails differ from m +- 1.96 sigma by 0.011 sigma
-    assert np.max(r.stats["rel_diff_lo"]) < 0.05
+    assert r.stats["median_rel_diff"] < 0.05
 
 
 def test_g6_skewed_lognormal_fails():
@@ -416,7 +433,15 @@ def test_g6_skewed_lognormal_fails():
     draws = np.exp(1.0 * rng.standard_normal((60000, 2)))
     r = gates.g6_shape(draws, np.full(60000, 1 / 60000))
     assert r.status == "fail"
-    assert np.max(r.stats["rel_diff_lo"]) > 0.1
+    assert r.stats["median_rel_diff"] > 0.2
+
+
+def test_g6_judges_the_median_over_points_not_the_worst_point():
+    rng = np.random.default_rng(33)
+    good = rng.standard_normal((60000, 9))
+    wild = np.exp(rng.standard_normal((60000, 1)))  # one skewed point of ten
+    r = gates.g6_shape(np.hstack([good, wild]), np.full(60000, 1 / 60000))
+    assert r.status == "pass" and np.max(r.stats["rel_diff"]) > 0.2
 
 
 def test_g6_respects_the_weights():

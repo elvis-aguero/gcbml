@@ -210,6 +210,12 @@ class OracleRank:
     value: float
     gain: float
     se: float
+    n: int = 0  # fantasies (full refits) behind the value
+    rel_se: float = float("nan")  # s.e. of the mean gain / mean gain
+    rhat_p0: float = float("nan")  # worst rhat of log p0 over the refits
+    raw_gains: tuple = ()  # H_ref - H_after of every refit, divergent ones included
+    raw_rhats: tuple = ()  # rhat of log p0 of every refit
+    n_discarded: int = 0  # divergent refits left out of the mean (see campaign.oracle_values)
 
 
 def a12_oracle_ranking(
@@ -219,6 +225,7 @@ def a12_oracle_ranking(
     n_refit_draws: int,
     key=None,
     source: str = "model",
+    **kw,
 ) -> list[OracleRank]:
     """Rank ``candidates`` by the value of a probe with every posterior refitted by MCMC on its fantasy.
 
@@ -233,4 +240,4 @@ def a12_oracle_ranking(
     """
     from gcbml.campaign import oracle_values  # local import: campaign does not import synthetic
 
-    return oracle_values(truth, campaign_state, candidates, n_refit_draws, key, source)
+    return oracle_values(truth, campaign_state, candidates, n_refit_draws, key, source, **kw)

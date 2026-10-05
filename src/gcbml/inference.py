@@ -59,8 +59,8 @@ flatten(posterior) -> (ModelParams with one leading axis S, z (S, n_pad))     po
 
 from __future__ import annotations
 
+import collections
 import copy
-import functools
 import math
 from typing import Any, NamedTuple
 
@@ -493,8 +493,11 @@ class _Sampler:
         return self.params(t, st["zeta"], pi)
 
 
-@functools.lru_cache(maxsize=32)
-def _runner(template: _Sampler, n_warmup: int, n_samples: int, n_chains: int):
+MAX_COMPILED = 4  # compiled programs kept alive (LRU); a campaign grows n_pad through ~10 buckets
+_COMPILED: collections.OrderedDict = collections.OrderedDict()
+
+
+def _make_runner(template: _Sampler, n_warmup: int, n_samples: int, n_chains: int):
     """Starting rule, warm-up (width adaptation), sampling, constrained parameters.
 
     Every stage is a compiled program mapped over the chains by mcmc.chains (chain_map: one single-chain
@@ -539,7 +542,36 @@ def _template_key(sampler: _Sampler):
     return (sampler.cfg, sampler.sc, sampler.nu, sampler.varying, sampler.weight, sampler.any_censored)
 
 
-_TEMPLATES: dict = {}
+def _runner_for(sampler: _Sampler, n_warmup: int, n_samples: int, n_chains: int):
+    """The compiled program for this static structure and these shapes, from a bounded LRU.
+
+    The key is (structure, array shapes, chain settings). Programs of the least recently used keys are
+    dropped once more than MAX_COMPILED exist, which releases their executables (a long campaign that
+    compiled every size kept all of them and ran out of code memory).
+    """
+    shapes = tuple(a.shape for a in sampler.aux)
+    key = (_template_key(sampler), shapes, n_warmup, n_samples, n_chains)
+    hit = _COMPILED.get(key)
+    if hit is None:
+        hit = _make_runner(sampler, n_warmup, n_samples, n_chains)
+        _COMPILED[key] = hit
+        while len(_COMPILED) > MAX_COMPILED:
+            _COMPILED.popitem(last=False)
+    _COMPILED.move_to_end(key)
+    return hit
+
+
+def n_compiled() -> int:
+    return len(_COMPILED)
+
+
+def clear_compiled() -> None:
+    _COMPILED.clear()
+
+
+def compiled_entry_for_test():
+    """The most recently used compiled program (tests: weak references to see that evicted ones are freed)."""
+    return next(reversed(_COMPILED.values()))
 
 
 def _fit_impl(
@@ -558,11 +590,7 @@ def _fit_impl(
 ):
     """fit() with a likelihood weight (0 turns the data off: the chain then targets the prior; tests only)."""
     sampler = _Sampler(data, z, bounds, cfg, scales, n_controls, varying_order, likelihood_weight)
-    # reuse the compiled program of an earlier sampler with the same static structure and shapes
-    shapes = tuple(a.shape for a in sampler.aux)
-    tkey = (_template_key(sampler), shapes)
-    template = _TEMPLATES.setdefault(tkey, sampler)
-    res, params, n_init, finite = _runner(template, int(n_warmup), int(n_samples), int(n_chains))(
+    res, params, n_init, finite = _runner_for(sampler, int(n_warmup), int(n_samples), int(n_chains))(
         sampler.aux, key
     )
     if sampler.weight != 0.0 and not bool(jnp.all(finite)):

@@ -506,3 +506,33 @@ def test_noise_hyperparameters_converge_at_n30_with_the_non_centred_move():
     rh, bulk, tail = post.diagnostics["log_p0[0]"]
     print("log_p0", round(rh, 3), round(bulk), round(tail))
     assert rh < 1.05 and bulk > 400
+
+
+@pytest.mark.slow
+def test_compiled_template_cache_is_bounded_over_growing_padded_sizes():
+    """A campaign grows n_pad through ~10 buckets; only MAX_COMPILED programs may stay alive (an LRU)."""
+    import gc
+    import weakref
+
+    inference.clear_compiled()
+    rng = np.random.default_rng(0)
+    refs = []
+    sizes = [16, 20, 24, 32, 40, 48, 56, 64, 72, 80]
+    for n_pad in sizes:
+        n = n_pad - 3
+        X = rng.uniform(0.05, 0.95, (n, 1))
+        H = rng.choice([1.0, 0.5, 0.25], size=(n, 1))
+        z = rng.standard_normal(n)
+        data, zp = pad(X, H, z, n_pad=n_pad)
+        inference.fit(jax.random.key(0), data, zp, zp, ModelConfig(), SCALES, 1, 2, 2, n_chains=1)
+        assert inference.n_compiled() <= inference.MAX_COMPILED
+        refs.append(weakref.ref(inference.compiled_entry_for_test()))
+    assert inference.n_compiled() == inference.MAX_COMPILED
+    gc.collect()
+    # the programs of the oldest sizes are released, not just hidden
+    assert sum(r() is None for r in refs) >= len(sizes) - inference.MAX_COMPILED
+    # a size used again after eviction still works (recompiled), and a hit does not grow the cache
+    data, zp = pad(X, H, z, n_pad=sizes[-1])
+    n0 = inference.n_compiled()
+    inference.fit(jax.random.key(1), data, zp, zp, ModelConfig(), SCALES, 1, 2, 2, n_chains=1)
+    assert inference.n_compiled() == n0
