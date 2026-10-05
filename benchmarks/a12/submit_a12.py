@@ -28,7 +28,6 @@ def script(out: Path, time: str, mem: str, extra: str, n: int, first: int) -> st
 #SBATCH --output={out}/slurm_%a.out
 #SBATCH --error={out}/slurm_%a.err
 cd {ROOT}
-export XLA_FLAGS="--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=4"
 export OMP_NUM_THREADS=4
 uv run python -m benchmarks.a12.run_truth --seed $SLURM_ARRAY_TASK_ID --out {out} {extra}
 """

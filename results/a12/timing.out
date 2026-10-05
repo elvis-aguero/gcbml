@@ -1,5 +1,0 @@
-warmup 150 samples 100 rep 0: 81s rhat(log p0) 1.244 true p 0.79
-warmup 150 samples 100 rep 1: 44s rhat(log p0) 1.041 true p 0.79
-warmup 300 samples 200 rep 0: 117s rhat(log p0) 1.065 true p 0.79
-warmup 300 samples 200 rep 1: 79s rhat(log p0) 1.035 true p 0.79
-warmup 500 samples 300 rep 0: 169s rhat(log p0) 1.030 true p 0.79
