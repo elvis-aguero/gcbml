@@ -33,7 +33,7 @@ extra = [Probe(f"x3_{i}", tuple(rng.uniform(size=2)), c._h_of_level(3), None) fo
 o.submit(extra, [1e12] * len(extra))
 c.tell(o.poll())
 print("n rows", c._n_rows(), flush=True)
-Campaign.WARM_START = True
+Campaign.WARM_START, Campaign.PARALLEL_FITS = True, True
 t0 = time.time()
 an = c._analyse()
 t1 = time.time() - t0
@@ -44,13 +44,15 @@ more = [Probe(f"y_{i}", tuple(rng.uniform(size=2)), c._h_of_level(0), None) for 
 o.submit(more, [1e12] * 6)
 c.tell(o.poll())
 out = {}
-for warm in (False, True):
-    Campaign.WARM_START = warm
+for warm, par in ((False, False), (True, False), (True, True)):
+    Campaign.WARM_START, Campaign.PARALLEL_FITS = warm, par
     c._cache = None
     c._warm = copy.deepcopy(warm1)
     c._min_level, c._removals, c._buy_cycles = state
     t0 = time.time()
     an2 = c._analyse()
-    out[warm] = time.time() - t0
-    print(f"analysis 2, WARM_START={warm}: {out[warm]:.0f}s; sigma_epi median {np.median(an2.sigma_epi):.4f}", flush=True)
-print(f"speed-up {out[False] / out[True]:.2f}x")
+    out[(warm, par)] = time.time() - t0
+    print(f"analysis 2, WARM_START={warm} PARALLEL_FITS={par}: {out[(warm, par)]:.0f}s; "
+          f"sigma_epi median {np.median(an2.sigma_epi):.4f}", flush=True)
+print(f"speed-up warm {out[(False, False)] / out[(True, False)]:.2f}x, warm+parallel "
+      f"{out[(False, False)] / out[(True, True)]:.2f}x")
