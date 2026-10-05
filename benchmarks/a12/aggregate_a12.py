@@ -28,7 +28,10 @@ def main(argv=None) -> int:
     files = sorted(Path(args.dir).glob("truth_*.json"), key=lambda p: int(p.stem.split("_")[1]))
     res = [json.loads(f.read_text()) for f in files]
     print(f"{len(res)} of {args.n} truths found")
-    hdr = "seed   p   choice_lvl oracle_best_lvl regret  | gain acq/oracle per level 0..4 (oracle rel s.e., fantasies used + divergent discarded)"
+    hdr = (
+        "seed   p   choice_lvl oracle_best_lvl regret  | gain acq/oracle per level 0..4 "
+        "(oracle rel s.e., fantasies used + divergent discarded)"
+    )
     print(hdr)
     hits, ratios = 0, {lev: [] for lev in range(5)}
     for r in res:
@@ -74,4 +77,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys
+    sys.exit(main())
