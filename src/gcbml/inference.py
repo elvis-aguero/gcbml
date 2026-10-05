@@ -52,7 +52,8 @@ Posterior: NamedTuple with
     params: ModelParams with leading axes (n_chains, n_samples)   (constrained, ready for model.*)
     z: (n_chains, n_samples, n_pad) imputed outputs
     theta: dict name -> (n_chains, n_samples, ...) unconstrained draws (for diagnostics)
-    diagnostics: mcmc.diagnostics.summary over every scalar of theta and log sigma_z
+    diagnostics: mcmc.diagnostics.summary over every scalar of theta and log sigma_z (a Diagnostics dict; its
+        attribute n_extensions counts the automatic extensions of fit(), see there)
     n_evals: total log-likelihood evaluations
 flatten(posterior) -> (ModelParams with one leading axis S, z (S, n_pad))     pools chains for prediction.
 """
@@ -91,6 +92,19 @@ N_CANDIDATES = 16  # prior draws tried per chain for a finite starting density
 PI_SIGMA0, PI_ELL0 = 0.3, 0.1  # P(sigma_pi > 0.3) = 0.05, P(ell_pi < 0.1) = 0.05 (spec 2.5)
 PI_SURROGATE_VAR = 0.25  # surrogate-data noise variance of pi_j (assumption b)
 ALPHA = 0.05  # PC prior tail probability
+
+
+class Diagnostics(dict):
+    """mcmc.diagnostics.summary (name -> (rhat, bulk ESS, tail ESS)) plus ``n_extensions``: how many times
+    fit() continued the chains because rhat > EXT_RHAT or bulk ESS < EXT_ESS for some scalar."""
+
+    n_extensions: int = 0
+
+
+EXT_RHAT = 1.05
+EXT_ESS = 400.0
+EXT_WARMUP = 100  # warm-up iterations of an extension (the widths are re-adapted, the draws discarded)
+MAX_EXTENSIONS = 2
 
 
 class Posterior(NamedTuple):
@@ -639,15 +653,34 @@ def _fit_impl(
     if sampler.varying:
         theta["log_sigma_pi"], theta["log_ell_pi"] = s["hpi"][..., 0], s["hpi"][..., 1:]
     theta = {name: np.asarray(v) for name, v in theta.items()}
+    n_evals = int(n_init) + int(np.sum(res.info["n_evals"]))
+    if res.warmup_info is not None:
+        n_evals += int(np.sum(res.warmup_info["n_evals"]))
+    return Posterior(params, s["z"], theta, _summarize(theta), n_evals)
+
+
+def _summarize(theta: dict, n_extensions: int = 0) -> Diagnostics:
     scalars = {}
     for name, v in theta.items():
         flat = v.reshape(v.shape[:2] + (-1,))
         for i in range(flat.shape[-1]):
             scalars[name if flat.shape[-1] == 1 and v.ndim == 2 else f"{name}[{i}]"] = flat[:, :, i]
-    n_evals = int(n_init) + int(np.sum(res.info["n_evals"]))
-    if res.warmup_info is not None:
-        n_evals += int(np.sum(res.warmup_info["n_evals"]))
-    return Posterior(params, s["z"], theta, dg.summary(scalars), n_evals)
+    out = Diagnostics(dg.summary(scalars))
+    out.n_extensions = n_extensions
+    return out
+
+
+def _needs_extension(diagnostics: dict) -> bool:
+    """Some reported scalar has rhat > EXT_RHAT or bulk ESS < EXT_ESS (a NaN counts as failing)."""
+    return any(not (rh <= EXT_RHAT and bulk >= EXT_ESS) for rh, bulk, _ in diagnostics.values())
+
+
+def _append(a: Posterior, b: Posterior, n_extensions: int) -> Posterior:
+    """The draws of b after those of a, chain by chain (sample axis 1)."""
+    cat = lambda x, y: jnp.concatenate([x, y], axis=1)  # noqa: E731
+    params = jax.tree_util.tree_map(cat, a.params, b.params)
+    theta = {k: np.concatenate([a.theta[k], b.theta[k]], axis=1) for k in a.theta}
+    return Posterior(params, cat(a.z, b.z), theta, _summarize(theta, n_extensions), a.n_evals + b.n_evals)
 
 
 def fit(
@@ -663,12 +696,33 @@ def fit(
     n_chains: int = 4,
     varying_order: bool = False,
     init: Posterior | None = None,
+    max_extensions: int = MAX_EXTENSIONS,
 ) -> Posterior:
     """``init``: start chain c at the last draw of chain c of an earlier Posterior of the same model (warm
-    start: no prior start, no starting sweeps; the latent noise field restarts at its prior mean)."""
-    return _fit_impl(
-        key, data, z, bounds, cfg, scales, n_controls, n_warmup, n_samples, n_chains, varying_order, init=init
-    )
+    start: no prior start, no starting sweeps; the latent noise field restarts at its prior mean).
+
+    Automatic extension: after sampling, if any reported scalar has rhat > 1.05 or bulk ESS < 400, the same
+    chains continue from their last draws (a warm start with at most 100 warm-up iterations, discarded) for
+    another n_samples draws, which are appended; at most ``max_extensions`` (default 2) times. The number used
+    is ``posterior.diagnostics.n_extensions``; the diagnostics describe all the draws. Not available with a
+    varying order (the warm start is not implemented there): such a fit is returned as it is.
+    """
+    args = (data, z, bounds, cfg, scales, n_controls)
+    post = _fit_impl(key, *args, n_warmup, n_samples, n_chains, varying_order, init=init)
+    n_ext = 0
+    while n_ext < max_extensions and not varying_order and _needs_extension(post.diagnostics):
+        ext = _fit_impl(
+            jax.random.fold_in(key, 7919 + n_ext),
+            *args,
+            min(EXT_WARMUP, n_warmup),
+            n_samples,
+            n_chains,
+            varying_order,
+            init=post,
+        )
+        n_ext += 1
+        post = _append(post, ext, n_ext)
+    return post
 
 
 def flatten(posterior: Posterior):
