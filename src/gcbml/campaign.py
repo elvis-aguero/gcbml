@@ -71,6 +71,7 @@ import functools
 import json
 import math
 import os
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -299,6 +300,7 @@ class _Analysis:
     g1: tuple | None = None
     skipped: list = field(default_factory=list)
     gate_loc: dict = field(default_factory=dict)  # gate name -> (data rows, standardised residuals)
+    fid_cache: dict = field(default_factory=dict)  # level -> sigma_fid (Sigma_N,), computed once per analysis
 
 
 @dataclass
@@ -323,6 +325,10 @@ def _arrays(data: PaddedData):
 
 
 class Campaign:
+    WARM_START = True  # start refits at the last posterior draws (inference.fit(init=...))
+    WARM_FRACTION = 0.25  # warm-up of a warm-started fit = max(WARM_MIN, round(WARM_FRACTION * n_warmup))
+    WARM_MIN = 40
+
     def __init__(
         self, problem: Problem, scales: PriorScales, cost_prior, settings: CampaignSettings | None = None,
         state_dir=None,
@@ -345,6 +351,7 @@ class Campaign:
         self._min_level = 0
         self._removals = 0
         self._buy_cycles = 0
+        self._warm: dict[str, dict] = {}  # structure name -> last draw of every chain (theta arrays)
         self._cache: _Analysis | None = None
         self._report_cache: Report | None = None
         self._report_cache_key: tuple = ()
@@ -557,8 +564,12 @@ class Campaign:
 
     # ------------------------------------------------------------------ Step 2: fits and weights
 
-    def _fit_all(self, data: PaddedData, key, skip_note: list | None = None) -> list[_Fit]:
+    def _fit_all(
+        self, data: PaddedData, key, skip_note: list | None = None, init: list | None = None,
+        n_warmup: int | None = None,
+    ) -> list[_Fit]:  # fmt: skip
         s = self.settings
+        n_warmup = s.n_warmup if n_warmup is None else n_warmup
         y = np.asarray(data.y, dtype=float)
         fits = []
         i = 0
@@ -573,9 +584,15 @@ class Campaign:
                     continue
                 cfg = ModelConfig(h_kernel=hk, increasing=(tname != "reciprocal"))
                 z = np.asarray(tf.forward(jnp.asarray(y)))
+                name = f"{hk}/{tname}"
+                if isinstance(init, dict):
+                    ini = init.get(name)
+                else:
+                    ini = None if init is None else init[i]
                 post = inference.fit(
                     jax.random.fold_in(key, i), data, z, z, cfg, self.scales, self._nc,
-                    s.n_warmup, s.n_samples, s.n_chains, s.varying_order,
+                    n_warmup, s.n_samples, s.n_chains, s.varying_order,
+                    init=ini,
                 )  # fmt: skip
                 params, zs = inference.flatten(post)
                 idx = _thin_idx(int(zs.shape[0]), N_ACQ_DRAWS)
@@ -636,7 +653,7 @@ class Campaign:
         sites = np.unique(np.asarray(data.X)[rows], axis=0) if rows.size else np.zeros((0, 1))
         if len(sites) < MIN_SITES_HOLDOUT:
             return eq, f"equal weights: {len(sites)} held-out sites (< {MIN_SITES_HOLDOUT})", None
-        fits_tr = self._fit_all(train, jax.random.fold_in(key, 77))
+        fits_tr = self._fit_all(train, jax.random.fold_in(key, 77), **self._refit_kw(fits))
         sps = [f.sp for f in fits_tr]
         scores = stacking.log_scores(sps, train, rows)
         w = stacking.stack_weights(scores)
@@ -693,7 +710,28 @@ class Campaign:
             break
         an.key = (len(self.dataset), self._min_level)
         self._cache = an
+        self._warm = self._last_draws(an.fits)
         return an
+
+    def _refit_kw(self, fits) -> dict:
+        """Warm start of a derived refit (hold-out, G4) from the draws of the main fit of this analysis."""
+        if not self.WARM_START:
+            return {}
+        init = {n: types.SimpleNamespace(theta=d) for n, d in self._last_draws(fits).items()}
+        return {"init": init, "n_warmup": self._warm_warmup()}
+
+    def _warm_warmup(self) -> int:
+        return max(self.WARM_MIN, round(self.WARM_FRACTION * self.settings.n_warmup))
+
+    def _warm_inits(self):
+        """{name: last draws} of the latest posterior, or None (cold start): see inference.fit(init=...)."""
+        if not self.WARM_START or not self._warm:
+            return None
+        return {n: types.SimpleNamespace(theta=d) for n, d in self._warm.items()}
+
+    @staticmethod
+    def _last_draws(fits) -> dict:
+        return {f.name: {k: np.asarray(v)[:, -1:] for k, v in f.post.theta.items()} for f in fits}
 
     def _noise_fn(self, f: _Fit):
         """Candidate -> (S_k, 1) noise variance of a new row in THIS structure's Lambda units, per draw.
@@ -722,7 +760,14 @@ class Campaign:
         Xs = self.problem.sigma_n
         key = self._fit_key(0)
         skipped: list[str] = []
-        fits = reuse if reuse is not None else self._fit_all(data, key, skipped)
+        warm = self._warm_inits()
+        fits = (
+            reuse
+            if reuse is not None
+            else self._fit_all(
+                data, key, skipped, init=warm, n_warmup=None if warm is None else self._warm_warmup()
+            )
+        )
         weights, wnote, g1 = self._stacking(data, levels, fits, key)
         structures = self._weighted(fits, weights)
         moments = self._moments(fits, data, Xs)
@@ -812,7 +857,7 @@ class Campaign:
             if len(active) < 4:  # removing the coarsest level must leave at least 3 levels
                 return gates.GateResult("G4", "not testable", {"reason": f"{len(active)} levels (< 4)"})
             data_wo = dataclasses.replace(data, mask=mask & (an.levels > int(active.min())))
-            fits_wo = self._fit_all(data_wo, jax.random.fold_in(key, 91))
+            fits_wo = self._fit_all(data_wo, jax.random.fold_in(key, 91), **self._refit_kw(fits))
             mom = self._moments(fits_wo, data_wo, self.problem.sigma_n)
             d, w = self._pool(fits_wo, an.weights, mom, jax.random.fold_in(key, 92))
             m_wo = np.asarray(predict.weighted_quantile(d, w, 0.5))
@@ -1008,7 +1053,9 @@ class Campaign:
                     jnp.broadcast_to(hbar, (s, self._k)), wt,
                 )
             )  # fmt: skip
-            fid[lv] = self._sigma_fid(fits, w, data, S0, hbar, jax.random.fold_in(key, 10 + lv))
+            if lv not in an.fid_cache:
+                an.fid_cache[lv] = self._sigma_fid(fits, w, data, S0, hbar, jax.random.fold_in(key, 10 + lv))
+            fid[lv] = an.fid_cache[lv]
         # posteriors of the order and the transfer coefficients
         p0 = np.exp(np.concatenate([np.asarray(f.post.theta["log_p0"]).reshape(-1, self._k) for f in fits]))
         q = np.quantile(p0, [0.16, 0.5, 0.84], axis=0)
@@ -1331,6 +1378,9 @@ class Campaign:
             "buy_cycles": self._buy_cycles,
             "results": meta,
         }
+        for name, d in self._warm.items():
+            for k, v in d.items():
+                arrays[f"warm|{name}|{k}"] = np.asarray(v)
         npz_tmp = self.state_dir / "results.tmp.npz"
         json_tmp = self.state_dir / "state.tmp.json"
         np.savez(npz_tmp, **arrays)
@@ -1350,6 +1400,10 @@ class Campaign:
             d,
         )
         z = np.load(d / "results.npz")
+        for key in z.files:
+            if key.startswith("warm|"):
+                _, name, k = key.split("|")
+                c._warm.setdefault(name, {})[k] = z[key]
         for i, m in enumerate(s["results"]):
             c.dataset.add(
                 RunResult(
@@ -1437,13 +1491,17 @@ def _fantasy_outcome(truth, campaign: Campaign, an: _Analysis, cand: Candidate, 
     return float(f.tf.inverse(mean[0] + jnp.sqrt(var[0]) * jax.random.normal(k3)))
 
 
-def refit_H(campaign: Campaign, an: _Analysis, dataset: Dataset, key):
+def refit_H(campaign: Campaign, an: _Analysis, dataset: Dataset, key, warm: bool = False, n_warmup=None):
     """Full MCMC refit of every structure on ``dataset`` with the stacking weights of ``an`` held fixed
-    (spec Step 5); returns (H_n of the refitted pool, max over structures of rhat of log p0)."""
+    (spec Step 5); returns (H_n of the refitted pool, max over structures of rhat of log p0).
+
+    ``warm``: chains start at the last draws of the base posterior ``an`` (inference.fit(init=...)), with
+    ``n_warmup`` iterations of warm-up (default the campaign's)."""
     from gcbml.mcmc import diagnostics as dg
 
     data2, _ = campaign._build_data(dataset)
-    fits2 = campaign._fit_all(data2, key)
+    init = [f.post for f in an.fits] if warm else None
+    fits2 = campaign._fit_all(data2, key, init=init, n_warmup=n_warmup)
     structs2 = campaign._weighted(fits2, an.weights)
     sig2 = np.asarray(acq.sigma_epi_physical(structs2, data2, campaign.problem.sigma_n))
     rhat = max(float(dg.rhat(np.asarray(f.post.theta["log_p0"])[..., 0])) for f in fits2)
@@ -1464,7 +1522,7 @@ def fantasy_dataset(campaign: Campaign, cand: Candidate, y: float, tag: str) -> 
 def oracle_values(
     truth, campaign: Campaign, candidates, n_refit_draws: int, key=None, source: str = "model",
     se_target: float | None = None, n_max: int | None = None, H_base: float | None = None,
-    max_h_ratio: float = 10.0,
+    max_h_ratio: float = 10.0, warm: bool = False, paired: bool = False, refit_warmup: int | None = None,
 ):  # fmt: skip
     """See synthetic.a12_oracle_ranking. Imported lazily by it so that campaign does not import synthetic.
 
@@ -1474,13 +1532,18 @@ def oracle_values(
     the refit's own Monte Carlo bias from the gain). A refit whose H_after exceeds ``max_h_ratio`` x the
     reference is a divergent fit (seen once, with H ~ 1e51, in 60 refits): it is counted in ``n_discarded``
     and left out of the mean, and the raw gains are returned for any other treatment. [assumption]
+
+    ``warm``: every refit starts at the base posterior (``refit_warmup`` warm-up iterations).
+    ``paired``: the gain of fantasy number j is H(refit of the unchanged data) - H(refit with the fantasy),
+    both refits with the SAME key (common random numbers: the Monte Carlo error of the two largely cancels);
+    the key of fantasy number j is shared by all candidates, so the reference refit of j is computed once.
     """
     from gcbml.synthetic import OracleRank
 
     an = campaign._analyse()
     key = jax.random.PRNGKey(0) if key is None else key
     H_now = float(acq.H_value(an.sigma_epi, an.eps, campaign.mode)) if H_base is None else float(H_base)
-    out = []
+    out, refs = [], {}
     for i, cand in enumerate(candidates):
         gains, rhats, n_drawn = [], [], 0
         n_target = n_refit_draws
@@ -1489,9 +1552,16 @@ def oracle_values(
                 kf = jax.random.fold_in(key, i * 100000 + n_drawn)
                 y = _fantasy_outcome(truth, campaign, an, cand, kf, source)
                 ds = fantasy_dataset(campaign, cand, y, f"{i}-{n_drawn}")
-                H_after, rh = refit_H(campaign, an, ds, jax.random.fold_in(kf, 9))
+                if paired:
+                    kj = jax.random.fold_in(key, 888000 + n_drawn)
+                    if n_drawn not in refs:
+                        refs[n_drawn] = refit_H(campaign, an, campaign.dataset, kj, warm, refit_warmup)[0]
+                    H_ref = refs[n_drawn]
+                else:
+                    kj, H_ref = jax.random.fold_in(kf, 9), H_now
+                H_after, rh = refit_H(campaign, an, ds, kj, warm, refit_warmup)
                 n_drawn += 1
-                gains.append(H_now - H_after)
+                gains.append(H_ref - H_after)
                 rhats.append(rh)
             raw = np.asarray(gains)
             g = raw[np.isfinite(raw) & (raw > -(max_h_ratio - 1.0) * abs(H_now))]

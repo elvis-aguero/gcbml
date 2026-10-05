@@ -536,3 +536,20 @@ def test_compiled_template_cache_is_bounded_over_growing_padded_sizes():
     n0 = inference.n_compiled()
     inference.fit(jax.random.key(1), data, zp, zp, ModelConfig(), SCALES, 1, 2, 2, n_chains=1)
     assert inference.n_compiled() == n0
+
+
+@pytest.mark.slow
+def test_warm_start_from_a_posterior_samples_the_same_posterior_and_is_deterministic(recovery):
+    """fit(..., init=post): chain c starts at the last draw of chain c of ``post`` (no prior start, no
+    200 initial sweeps). The same key gives the same fit; the posterior is the one of a cold start."""
+    data, cfg, post, _, (X, H, z) = recovery
+    zp = np.asarray(data.y)
+    kw = dict(n_controls=1, n_warmup=60, n_samples=200)
+    w1 = inference.fit(jax.random.key(5), data, zp, zp, cfg, SCALES, init=post, **kw)
+    w2 = inference.fit(jax.random.key(5), data, zp, zp, cfg, SCALES, init=post, **kw)
+    np.testing.assert_array_equal(w1.theta["log_p0"], w2.theta["log_p0"])
+    base = np.asarray(post.theta["log_p0"]).reshape(-1)
+    warm = np.asarray(w1.theta["log_p0"]).reshape(-1)
+    se = np.sqrt(base.var() / 60 + warm.var() / 60)  # generous effective sample sizes
+    assert abs(base.mean() - warm.mean()) < 4 * se, (base.mean(), warm.mean(), se)
+    assert w1.n_evals < 0.8 * post.n_evals  # a warm start skips the starting rule

@@ -59,7 +59,7 @@ def _fake_gates(failing=()):
     return gates_
 
 
-def _fake_fit_all(self, data, key, skip_note=None):
+def _fake_fit_all(self, data, key, skip_note=None, init=None, n_warmup=None):
     """Stand-in for the MCMC fits: 4 fixed-hyperparameter draws per structure (no sampler, no compilation).
 
     The posterior of mu and of the levels is still computed from the real data by the real GP algebra, so
@@ -698,3 +698,98 @@ def test_an_unprobed_level_with_an_enormous_expected_cost_is_priced_at_most_at_i
     plain = float(cost.expected_cost(m, v, w)[0])
     assert plain > 1e3 * float(cap[0])  # E[c] is dominated by the far tail of the lognormal
     assert 0 < float(mean[0]) <= float(cap[0]) * (1 + 1e-9)
+
+
+# ----------------------------------------------------------------------------------------------
+# Warm-started refits in _analyse
+# ----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_later_fits_warm_start_from_the_last_draws_with_a_shorter_warmup_and_survive_a_reload(
+    tmp_path, monkeypatch
+):
+    calls = []
+    real = Campaign._fit_all
+
+    def spy(self, data, key, skip_note=None, init=None, n_warmup=None):
+        calls.append((init is not None, n_warmup))
+        return real(self, data, key, skip_note, init, n_warmup)
+
+    monkeypatch.setattr(Campaign, "_fit_all", spy)
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e-4)
+    c = make(t, state_dir=tmp_path)
+    o = run_initial(c, t)
+    c._analyse()
+    assert calls[0] == (False, None)  # the first fit is cold, with the full warm-up
+    assert set(c._warm) == {"twy2/identity"}
+    # more data: the main fit starts from the stored last draws, with a shorter warm-up
+    probes = c.ask()
+    assert probes
+    o.submit(probes, [c.cap_of(q) for q in probes])
+    c.tell(o.poll())
+    n_before = len(calls)
+    c._analyse()
+    new = calls[n_before:]
+    assert new and all(w for w, _ in new)
+    assert all(nw == max(40, round(0.25 * FAST.n_warmup)) for _, nw in new)
+    # the warm state is saved: a reloaded campaign starts from the same draws
+    c.save()
+    loaded = Campaign.load(tmp_path)
+    assert set(loaded._warm) == set(c._warm)
+    for name in c._warm:
+        for k, v in c._warm[name].items():
+            np.testing.assert_array_equal(loaded._warm[name][k], v)
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_sigma_fid_is_computed_once_per_analysis_and_level(monkeypatch):
+    monkeypatch.undo()  # the fixture's _sigma_fid stub would hide the call count
+    monkeypatch.setattr(Campaign, "_fit_all", _fake_fit_all)
+    monkeypatch.setattr(Campaign, "_gates", _fake_gates())
+    n = []
+    monkeypatch.setattr(
+        Campaign, "_sigma_fid", lambda self, fits, w, data, Xs, hbar, key: n.append(1) or np.zeros(len(Xs))
+    )
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e3)
+    c = make(t)
+    run_initial(c, t)
+    c.report()
+    first = len(n)
+    c._report_cache = None
+    c.report()  # same analysis: the per-level sigma_fid is taken from the cache
+    assert first == 3 and len(n) == first
+
+
+@pytest.mark.slow
+def test_a_warm_started_refit_agrees_with_a_cold_refit_of_the_same_data():
+    """G4's refit without the coarsest level, started from the full posterior with a short warm-up, gives
+    the posterior of a cold refit: KS on log p0 and the median |dm| / sigma_epi over Sigma_N below 0.25."""
+    import dataclasses as dc
+
+    from scipy import stats
+
+    from gcbml import predict
+
+    c = _four_level_campaign(2, mcmc=(300, 200, 4))
+    c._min_level = 0
+    data, lev = c._build_data()
+    full = c._fit_all(data, jax.random.PRNGKey(1))
+    data_wo = dc.replace(data, mask=np.asarray(data.mask) & (lev > 0))
+    cold = c._fit_all(data_wo, jax.random.PRNGKey(2))
+    warm = c._fit_all(data_wo, jax.random.PRNGKey(3), init={f.name: f.post for f in full}, n_warmup=75)
+    lc = np.asarray(cold[0].post.theta["log_p0"]).reshape(-1)
+    lw = np.asarray(warm[0].post.theta["log_p0"]).reshape(-1)
+    ks = stats.ks_2samp(lc, lw)
+    assert ks.pvalue > 0.01, (lc.mean(), lw.mean())
+
+    def med(fits):
+        mom = c._moments(fits, data_wo, c.problem.sigma_n)
+        d, w = c._pool(fits, np.ones(len(fits)) / len(fits), mom, jax.random.PRNGKey(7))
+        return np.asarray(predict.weighted_quantile(d, w, 0.5)), d.std(axis=0)
+
+    mc, sc = med(cold)
+    mw, _ = med(warm)
+    ratio = float(np.median(np.abs(mw - mc) / sc))
+    print(f"\nwarm vs cold: KS p = {ks.pvalue:.3f}, median |dm|/sigma = {ratio:.3f}")
+    assert ratio < 0.25

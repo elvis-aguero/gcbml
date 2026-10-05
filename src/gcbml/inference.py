@@ -526,9 +526,19 @@ def _make_runner(template: _Sampler, n_warmup: int, n_samples: int, n_chains: in
         lambda samples, aux: jax.vmap(template.with_aux(aux).constrain)(samples), n_chains, 1
     )
 
-    def run(aux, key):
+    def run(aux, key, warm=None):
         k_init, k_run = jax.random.split(key)
-        init, n_init, finite = init_all(jax.random.split(k_init, n_chains), aux)
+        if warm is None:
+            init, n_init, finite = init_all(jax.random.split(k_init, n_chains), aux)
+        else:  # warm start: (theta (C, size), hz (C, n_hz)) from an earlier posterior; zeta at its prior mean
+            theta0, hz0 = warm
+            init = {
+                "theta": jnp.asarray(theta0),
+                "hz": jnp.asarray(hz0),
+                "zeta": jnp.zeros((n_chains, template.n_sites)),
+                "z": jnp.broadcast_to(aux.z0, (n_chains,) + aux.z0.shape),
+            }
+            n_init, finite = jnp.zeros((), dtype=jnp.int64), jnp.ones(n_chains, dtype=bool)
         res = run_chains(
             k_run,
             init,
@@ -582,6 +592,24 @@ def compiled_entry_for_test():
     return next(reversed(_COMPILED.values()))
 
 
+def _warm_start(sampler: _Sampler, init: Posterior, n_chains: int):
+    """(theta (C, size), hz (C, n_hz)) of the last draw of every chain of ``init``."""
+    if sampler.varying:
+        raise NotImplementedError("a warm start is not implemented for a varying order")
+    th = init.theta
+    if np.asarray(th["log_sigma_z"]).shape[0] != n_chains:
+        raise ValueError("init has a different number of chains")
+    theta0 = np.concatenate(
+        [np.asarray(th[name])[:, -1].reshape(n_chains, -1) for name, _ in sampler.layout.fields], axis=1
+    )
+    hz0 = np.concatenate(
+        [np.asarray(th["log_sigma_z"])[:, -1][:, None], np.asarray(th["log_ell_z"])[:, -1]], axis=1
+    )
+    if theta0.shape[1] != sampler.layout.size or hz0.shape[1] != sampler.n_hz:
+        raise ValueError("init does not match this model (dimensions of theta differ)")
+    return theta0, hz0
+
+
 def _fit_impl(
     key,
     data,
@@ -595,11 +623,13 @@ def _fit_impl(
     n_chains=4,
     varying_order=False,
     likelihood_weight=1.0,
+    init=None,
 ):
     """fit() with a likelihood weight (0 turns the data off: the chain then targets the prior; tests only)."""
     sampler = _Sampler(data, z, bounds, cfg, scales, n_controls, varying_order, likelihood_weight)
+    warm = None if init is None else _warm_start(sampler, init, int(n_chains))
     res, params, n_init, finite = _runner_for(sampler, int(n_warmup), int(n_samples), int(n_chains))(
-        sampler.aux, key
+        sampler.aux, key, warm
     )
     if sampler.weight != 0.0 and not bool(jnp.all(finite)):
         raise RuntimeError("no prior draw with a finite posterior density was found for some chain")
@@ -632,9 +662,12 @@ def fit(
     n_samples: int,
     n_chains: int = 4,
     varying_order: bool = False,
+    init: Posterior | None = None,
 ) -> Posterior:
+    """``init``: start chain c at the last draw of chain c of an earlier Posterior of the same model (warm
+    start: no prior start, no starting sweeps; the latent noise field restarts at its prior mean)."""
     return _fit_impl(
-        key, data, z, bounds, cfg, scales, n_controls, n_warmup, n_samples, n_chains, varying_order
+        key, data, z, bounds, cfg, scales, n_controls, n_warmup, n_samples, n_chains, varying_order, init=init
     )
 
 

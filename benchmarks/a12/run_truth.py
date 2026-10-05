@@ -74,17 +74,18 @@ def run(args) -> dict:
         if idx.size:
             chosen.append(int(idx[np.argmax(np.asarray(tab.ratio)[idx])]))
     t_plan = time.time() - t_start
-    # reference H: mean of refits of the unchanged data
+    # unpaired mode only: reference H = mean of refits of the unchanged data
     hs, rh0 = [], []
-    for b in range(args.n_base):
+    for b in range(0 if args.paired else args.n_base):
         h, rh = refit_H(c, an, c.dataset, jax.random.PRNGKey(10_000 + b))
         hs.append(h)
         rh0.append(rh)
-    h_base = float(np.mean(hs))
+    h_base = float(np.mean(hs)) if hs else float(acq.H_value(an.sigma_epi, an.eps, c.mode))
     cands = [plan.cands[i] for i in chosen]
     ranking = oracle_values(
         truth, c, cands, args.n_min, key=jax.random.PRNGKey(args.seed + 5),
-        se_target=args.se_target, n_max=args.n_max, H_base=h_base,
+        se_target=args.se_target, n_max=args.n_max, H_base=h_base, warm=args.warm, paired=args.paired,
+        refit_warmup=args.refit_warmup,
     )  # fmt: skip
     by_idx = {r.index: r for r in ranking}
     rows = []
@@ -102,7 +103,8 @@ def run(args) -> dict:
         )  # fmt: skip
     out = dict(
         seed=args.seed, p=truth.p, H_now=float(acq.H_value(an.sigma_epi, an.eps, c.mode)), H_base=h_base,
-        H_base_sd=float(np.std(hs)), rhat_p0_base=max(rh0), rhat_p0_data=None, candidates=rows,
+        H_base_sd=float(np.std(hs)) if hs else 0.0, rhat_p0_base=max(rh0) if rh0 else float('nan'),
+        paired=args.paired, warm=args.warm, rhat_p0_data=None, candidates=rows,
         n_u=args.n_u, settings=dict(warmup=args.warmup, samples=args.samples, chains=args.chains),
         seconds=dict(fit=t_fit, plan=t_plan - t_fit, total=time.time() - t_start),
     )  # fmt: skip
@@ -120,8 +122,11 @@ def main(argv=None) -> None:
     ap.add_argument("--n-u", type=int, default=16)
     ap.add_argument("--max-draws", type=int, default=64)
     ap.add_argument("--n-base", type=int, default=3)
+    ap.add_argument("--refit-warmup", type=int, default=150)
+    ap.add_argument("--paired", action=argparse.BooleanOptionalAction, default=True)
+    ap.add_argument("--warm", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--n-min", type=int, default=12)
-    ap.add_argument("--n-max", type=int, default=48)
+    ap.add_argument("--n-max", type=int, default=128)
     ap.add_argument("--se-target", type=float, default=0.1)
     args = ap.parse_args(argv)
     res = run(args)
