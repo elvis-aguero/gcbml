@@ -85,7 +85,11 @@ def get_setup(name: str, rel_tol: float | None = None) -> Setup:
         rel_tol=eps if rel_tol is None else rel_tol,
         scales=PriorScales(S_mu=1.0, S_c=0.5, S_delta=0.5, S_noise=s_noise),
         cost_prior=CostPrior(
-            k0_mean=0.0, k0_sd=1.0, gamma_mean=(bp.work_gamma / k,) * k, gamma_sd=(0.5,) * k
+            k0_mean=0.0,
+            k0_sd=1.0,
+            gamma_mean=(bp.work_gamma / k,) * k,
+            gamma_sd=(0.5,) * k,
+            s_delta=(0.3,) * k,
         ),
     )
 

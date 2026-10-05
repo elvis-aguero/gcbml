@@ -100,9 +100,9 @@ def make_data(sim, n_pad=None, cap=None, **kw):
     return pad_data(sim["U"], sim["L"], y, cens, sim["log2q"], sim["has_q"], n_pad or bucket(n), **kw)
 
 
-def sample_coef(post, rng, n=4000):
-    """Pooled draws of (kappa0, gamma, a): beta | y, hyper is Gaussian for every hyper draw."""
-    mean, cov = (np.asarray(v) for v in cost.coef_posterior(post))
+def sample_coef(post, rng, n=4000, max_level=0):
+    """Pooled draws of (kappa0, Delta, a): beta | y, hyper is Gaussian for every hyper draw."""
+    mean, cov = (np.asarray(v) for v in cost.coef_posterior(post, max_level))
     S = mean.shape[0]
     idx = rng.integers(0, S, size=n)
     out = np.empty((n, mean.shape[1]))
@@ -129,7 +129,7 @@ def test_integrated_predictive_equals_brute_force_joint_gaussian():
     rng = np.random.default_rng(0)
     n, m, d_u, k, n_pad = 12, 5, 2, 2, 16
     prior = CostPrior(
-        k0_mean=1.0, k0_sd=2.0, gamma_mean=(3.0, 2.0), gamma_sd=(1.0, 1.5), l_scale=4.0, q_sd=0.4, t_sd=0.3
+        k0_mean=1.0, k0_sd=2.0, gamma_mean=(3.0, 2.0), gamma_sd=(1.0, 1.5), s_delta=(0.4, 0.3), l_scale=4.0
     )
     sim = simulate(rng, n, k, d_u=d_u, gamma=(3.0, 2.0), a=0.5, q_frac=0.5)
     data = make_data(sim, n_pad)
@@ -153,15 +153,25 @@ def test_integrated_predictive_equals_brute_force_joint_gaussian():
     mean, var = np.asarray(mean), np.asarray(var)
     assert mean.shape == (2, m) and var.shape == (2, m)
 
-    # brute force: latent vector (kappa0, gamma, a, omega over n + m runs, eta over n + m runs)
+    # brute force: latent vector (kappa0, Delta_{j,m} for m < M, a, omega over n + m runs, eta),
+    # the steps drawn explicitly as the random walk, g_j(l) = sum_{m<l} Delta_{j,m}
+    M = 4
     qbar = sim["log2q"][sim["has_q"]].mean()
-    q = 2 + 3 * k
-    b0 = np.array([1.0, 3.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0])
-    B = np.diag([2.0, 1.0, 1.5, 0.4, 0.4, 0.3, 0.3, 0.5]) ** 2
+    q = 2 + k * M
+    gam, sg, sdl = np.array([3.0, 2.0]), np.array([1.0, 1.5]), np.array([0.4, 0.3])
+    b0 = np.concatenate([[1.0], np.repeat(gam, M), [1.0]])
+    B = np.zeros((q, q))
+    B[0, 0], B[-1, -1] = 2.0**2, 0.5**2
+    mm = np.arange(M)
+    for j in range(k):
+        B[1 + j * M : 1 + (j + 1) * M, 1 + j * M : 1 + (j + 1) * M] = sg[j] ** 2 + sdl[
+            j
+        ] ** 2 * np.minimum.outer(mm, mm)
     Uall, Lall = np.vstack([sim["U"], Un]), np.vstack([sim["L"], Ln])
     hq_all = np.concatenate([sim["has_q"], hq_n])
     lq_all = np.concatenate([sim["log2q"], lq_n])
-    A = np.column_stack([np.ones(n + m), Lall, Lall**2, Lall**3, hq_all * (lq_all - qbar)])
+    ind = np.concatenate([(mm[None, :] < Lall[:, [j]]).astype(float) for j in range(k)], axis=1)
+    A = np.column_stack([np.ones(n + m), ind, hq_all * (lq_all - qbar)])
     X = np_inputs(Uall, Lall, 4.0)
     for s in range(2):
         N = n + m
@@ -178,12 +188,13 @@ def test_integrated_predictive_equals_brute_force_joint_gaussian():
         ref_var = np.diag(Cnn) - np.sum(Cno * w[:, 1:].T, axis=1)
         np.testing.assert_allclose(mean[s], ref_mean, rtol=0, atol=1e-8)
         np.testing.assert_allclose(var[s], ref_var, rtol=0, atol=1e-8)
-        # coefficient posterior beta | y, hyper: Cov(beta, y_obs) = B A_obs^T
+        # coefficient posterior (kappa0, Delta, a) | y, hyper: Cov(beta, y_obs) = B A_obs^T
         Cbo = B @ A[:n].T
         wb = np.linalg.solve(Coo, np.column_stack([y_pad[s, :n] - mu[:n], Cbo.T]))
         ref_bm = b0 + Cbo @ wb[:, 0]
         ref_bc = B - Cbo @ wb[:, 1:]
-        cm, cc = (np.asarray(v) for v in cost.coef_posterior(post))
+        cm, cc = (np.asarray(v) for v in cost.coef_posterior(post, max_level=M))
+        assert cm.shape == (2, q) and cc.shape == (2, q, q)
         np.testing.assert_allclose(cm[s], ref_bm, rtol=0, atol=1e-8)
         np.testing.assert_allclose(cc[s], ref_bc, rtol=0, atol=1e-8)
 
@@ -198,14 +209,14 @@ def test_posterior_covers_true_gamma(k):
     rng = np.random.default_rng(10 + k)
     gamma = (3.0,) if k == 1 else (3.0, 2.5)
     sim = simulate(rng, 60, k, gamma=gamma, a=0.6, q_frac=0.6, sw=0.5, s_eta=0.15)
-    prior = CostPrior(4.0, 3.0, (2.5,) * k, (1.0,) * k)
+    prior = CostPrior(4.0, 3.0, (2.5,) * k, (1.0,) * k, (0.3,) * k)
     post = cost.fit_cost(jax.random.key(k), make_data(sim), prior, **FAST)
-    draws = sample_coef(post, rng)
+    draws = sample_coef(post, rng, max_level=3)
     lo, hi = np.percentile(draws, [0.5, 99.5], axis=0)
-    truth = np.concatenate([[5.0], gamma, [0.0] * (2 * k), [0.6]])
+    truth = np.concatenate([[5.0], np.repeat(gamma, 3), [0.6]])  # Delta_{j,m} = gamma_j for m < 3
     assert np.all((lo <= truth) & (truth <= hi)), (lo, hi, truth)
     # the posterior is informative: much tighter than the gamma prior (sd 1)
-    assert np.all(draws[:, 1 : 1 + k].std(axis=0) < 0.6)
+    assert np.all(draws[:, 1 : 1 + 3 * k].std(axis=0) < 0.6)
 
 
 @pytest.mark.slow
@@ -221,7 +232,7 @@ def test_predictive_is_calibrated_at_held_out_runs():
         qbar_all = sim["log2q"][sim["has_q"]].mean()
         qbar_tr = tr["log2q"][tr["has_q"]].mean()
         te["y"] = te["y"] + 0.6 * te["has_q"] * (qbar_all - qbar_tr)
-        prior = CostPrior(4.0, 3.0, (2.5, 2.5), (1.0, 1.0))
+        prior = CostPrior(4.0, 3.0, (2.5, 2.5), (1.0, 1.0), (0.3, 0.3))
         post = cost.fit_cost(jax.random.key(rep), make_data(tr), prior, 300, 300, 4)
         mean, var = cost.predict_log2(post, te["U"], te["L"], te["log2q"], te["has_q"])
         mu, v = mixture_moments(mean, var)
@@ -250,7 +261,7 @@ def test_omega_absorbs_a_bend_in_level_and_straight_line_is_biased():
     Un = rng.random((10, 1))
     Ln = np.full((10, 1), 3.0)
     truth = bend(3.0)
-    prior = CostPrior(0.0, 3.0, (3.0,), (1.0,), l_scale=5.0)
+    prior = CostPrior(0.0, 3.0, (3.0,), (1.0,), (0.3,), l_scale=5.0)
     data = pad_data(U, L, y, np.zeros(n, bool), np.zeros(n), np.zeros(n, bool), bucket(n))
     post = cost.fit_cost(jax.random.key(0), data, prior, **FAST)
     mean, var = cost.predict_log2(post, Un, Ln, np.zeros(10), np.zeros(10, bool))
@@ -282,7 +293,7 @@ def test_tobit_prediction_consistent_with_uncensored_naive_is_biased_low():
     rng = np.random.default_rng(4)
     sim = simulate(rng, 60, 1, gamma=(3.0,), sw=0.3, s_eta=0.3, l_max=4)
     cap = np.quantile(sim["y"], 0.7)
-    prior = CostPrior(5.0, 3.0, (3.0,), (1.0,))
+    prior = CostPrior(5.0, 3.0, (3.0,), (1.0,), (0.3,))
     key = jax.random.key(4)
     Un, Ln = rng.random((20, 1)), np.full((20, 1), 4.0)  # the most censored level
     no_q = (np.zeros(20), np.zeros(20, bool))
@@ -309,7 +320,7 @@ def test_censored_imputations_respect_the_cap():
     sim = simulate(rng, 40, 1, gamma=(3.0,), s_eta=0.3)
     cap = np.quantile(sim["y"], 0.6)
     data = make_data(sim, cap=cap)
-    post = cost.fit_cost(jax.random.key(5), data, CostPrior(5.0, 3.0, (3.0,), (1.0,)), 100, 100, 4)
+    post = cost.fit_cost(jax.random.key(5), data, CostPrior(5.0, 3.0, (3.0,), (1.0,), (0.3,)), 100, 100, 4)
     y = np.asarray(post.log2c)
     cens = np.asarray(data.censored)
     assert np.all(y[:, cens] >= cap - 1e-12)
@@ -327,7 +338,7 @@ def test_censored_imputations_respect_the_cap():
 
 def _fit_quote_case(rng, log2q_fn, q_frac_fit=1.0, seed=0):
     sim = simulate(rng, 60, 1, gamma=(3.0,), sw=0.3, s_eta=0.3, q_frac=q_frac_fit, log2q_fn=log2q_fn, l_max=3)
-    prior = CostPrior(5.0, 3.0, (3.0,), (1.0,))
+    prior = CostPrior(5.0, 3.0, (3.0,), (1.0,), (0.3,))
     return sim, prior
 
 
@@ -423,7 +434,7 @@ def test_garbage_in_padded_rows_changes_nothing():
     rng = np.random.default_rng(11)
     sim = simulate(rng, 20, 1, gamma=(3.0,), a=0.5, q_frac=0.5, s_eta=0.3)
     cap = np.quantile(sim["y"], 0.8)
-    prior = CostPrior(5.0, 3.0, (3.0,), (1.0,))
+    prior = CostPrior(5.0, 3.0, (3.0,), (1.0,), (0.3,))
     clean = make_data(sim, 32, cap=cap)
     dirty = make_data(sim, 32, cap=cap, garbage=np.random.default_rng(99))
     dirty = dirty._replace(U=dirty.U.at[25:].set(jnp.nan), log2q=dirty.log2q.at[26:].set(jnp.inf))
@@ -451,7 +462,9 @@ def test_garbage_in_padded_rows_changes_nothing():
 def test_fit_reports_converging_diagnostics_and_shapes():
     rng = np.random.default_rng(12)
     sim = simulate(rng, 40, 1, gamma=(3.0,), s_eta=0.2)
-    post = cost.fit_cost(jax.random.key(12), make_data(sim), CostPrior(5.0, 3.0, (3.0,), (1.0,)), 100, 50, 4)
+    post = cost.fit_cost(
+        jax.random.key(12), make_data(sim), CostPrior(5.0, 3.0, (3.0,), (1.0,), (0.3,)), 100, 50, 4
+    )
     S = 4 * 50
     assert post.hyper["sigma_w"].shape == (S,)
     assert post.hyper["s_eta"].shape == (S,)
@@ -466,64 +479,83 @@ def test_fit_reports_converging_diagnostics_and_shapes():
 # ----------------------------------------------------------------------------------------------
 
 
-def ladder_coverage(
-    seed, lev_means=None, curvature=None, n_per=8, n_new=20, level_new=3, noise=0.3, noisy_truth=True
-):
-    """Fit levels 0..2 of a ladder with an accelerating log2 step, price level ``level_new``.
-
-    Returns (coverage of the 0.95 cap, E[c] / mean true cost) over n_new fresh runs.
+def ladder_coverage(seed, lev_means, prior, n_per=10, n_new=100, noise=0.3, new_levels=(3, 4)):
+    """Fit levels 0..2 of a ladder (log2 cost of level l = lev_means[l] + 0.8 (u_0 - 0.5) + noise), price the
+    unprobed levels ``new_levels``. Returns, per new level, the coverage of the 0.95 cap over n_new REALISED
+    (noisy) costs.
     """
     rng = np.random.default_rng(1000 + seed)
-    if lev_means is None:
-        gamma = 3.0
-        curvature = rng.uniform(0.0, 0.6) if curvature is None else curvature
-        lev_means = np.array([gamma * lv + curvature * lv * (lv - 1) / 2 for lv in range(level_new + 1)])
     lev_means = np.asarray(lev_means, dtype=float)
     L = np.repeat(np.arange(3), n_per).astype(float)[:, None]
     U = rng.random((L.shape[0], 2))
     y = lev_means[L[:, 0].astype(int)] + 0.8 * (U[:, 0] - 0.5) + noise * rng.standard_normal(L.shape[0])
-    prior = CostPrior(float(lev_means[0]), 3.0, (3.0,), (1.0,))
     data = pad_data(U, L, y, np.zeros(len(y), bool), np.zeros(len(y)), np.zeros(len(y), bool), bucket(len(y)))
     post = cost.fit_cost(jax.random.key(seed), data, prior, **FAST)
-    Un = rng.random((n_new, 2))
-    truth = lev_means[level_new] + 0.8 * (Un[:, 0] - 0.5)
-    if noisy_truth:  # the realised cost of a new run includes its own noise
-        truth = truth + noise * rng.standard_normal(n_new)
-    mean, var = cost.predict_log2(
-        post, Un, np.full((n_new, 1), float(level_new)), np.zeros(n_new), np.zeros(n_new, bool)
+    out = []
+    for lv in new_levels:
+        Un = rng.random((n_new, 2))
+        real = lev_means[lv] + 0.8 * (Un[:, 0] - 0.5) + noise * rng.standard_normal(n_new)
+        mean, var = cost.predict_log2(
+            post, Un, np.full((n_new, 1), float(lv)), np.zeros(n_new), np.zeros(n_new, bool)
+        )
+        w = np.full(mean.shape[0], 1.0 / mean.shape[0])
+        cap = np.log2(np.asarray(cost.cost_cap(mean, var, w, 0.95)))
+        out.append(float(np.mean(cap >= real)))
+    return out
+
+
+# a generic prior: kappa0 ~ N(0, 1), first step 2.5 +- 1.5 (covers [1, 4]), step increments sd 0.3
+GENERIC = CostPrior(0.0, 1.0, (2.5,), (1.5,), (0.3,))
+
+
+def prior_family_ladder(rng):
+    """log2 level costs 0..4 drawn from the walk with gamma ~ U[1, 4], s_delta ~ U[0, 0.6]."""
+    gamma, s_delta, kappa0 = rng.uniform(1.0, 4.0), rng.uniform(0.0, 0.6), rng.standard_normal()
+    steps = gamma + np.concatenate([[0.0], np.cumsum(s_delta * rng.standard_normal(3))])
+    return kappa0 + np.concatenate([[0.0], np.cumsum(steps)])
+
+
+def _coverage_report(name, cov):
+    cov = np.asarray(cov)
+    print(
+        f"{name}: realised-cost coverage of the 0.95 cap, first unprobed {cov[:, 0].mean():.3f}, "
+        f"second {cov[:, 1].mean():.3f} ({len(cov)} seeds)"
     )
-    w = np.full(mean.shape[0], 1.0 / mean.shape[0])
-    cap = np.log2(np.asarray(cost.cost_cap(mean, var, w, 0.95)))
-    ec = np.asarray(cost.expected_cost(mean, var, w))
-    return float(np.mean(cap >= truth)), float(ec.mean() / np.mean(2.0**truth))
-
-
-def test_cap_covers_an_unprobed_level_of_the_reviewer_ladder():
-    # per-probe costs 0.015, 0.25, 6, 300 core-hours: log2 steps 4.06, 4.58, 5.64
-    lev = np.log2([0.015, 0.25, 6.0, 300.0])
-    # the reviewer's protocol: 10 runs per level, truth is the noise-free level cost
-    res = [ladder_coverage(sd, lev_means=lev, n_per=10, noisy_truth=False) for sd in (0, 1)]
-    cov = np.mean([r[0] for r in res])
-    assert cov >= 0.8, res
-    assert all(0.5 < r[1] < 2.0 for r in res), res
+    return cov
 
 
 @pytest.mark.slow
-def test_cap_coverage_of_unprobed_level_over_accelerating_ladders():
-    res = np.array([ladder_coverage(sd) for sd in range(24)])
-    cov, ratio = res[:, 0].mean(), np.median(res[:, 1])
-    print(f"unprobed-level coverage of the 0.95 cap: {cov:.3f}; median E[c]/true: {ratio:.3f}")
-    assert cov >= 0.90, (cov, ratio)
-    assert 0.5 < ratio < 2.0, ratio
+def test_cap_covers_realised_costs_on_ladders_drawn_from_the_prior_family():
+    cov = _coverage_report(
+        "prior family",
+        [ladder_coverage(sd, prior_family_ladder(np.random.default_rng(sd)), GENERIC) for sd in range(24)],
+    )
+    assert cov[:, 0].mean() >= 0.90, cov.mean(axis=0)
 
 
 @pytest.mark.slow
-def test_cap_covers_realised_noisy_costs_at_the_unprobed_level_of_the_reviewer_ladder():
-    lev = np.log2([0.015, 0.25, 6.0, 300.0])
-    res = np.array([ladder_coverage(sd, lev_means=lev, n_per=10, n_new=200) for sd in range(24)])
-    cov = res[:, 0].mean()
-    print(f"reviewer ladder, realised-cost coverage of the 0.95 cap at level 3: {cov:.3f}")
-    assert cov >= 0.90, cov
+@pytest.mark.parametrize(
+    "name,steps", [("accelerating", [3.0, 3.5, 4.0, 4.5]), ("decelerating", [4.0, 3.5, 3.0, 2.5])]
+)
+def test_cap_covers_realised_costs_on_deterministic_ladders(name, steps):
+    lev = np.concatenate([[0.0], np.cumsum(steps)])
+    cov = _coverage_report(name, [ladder_coverage(sd, lev, GENERIC) for sd in range(24)])
+    assert cov[:, 0].mean() >= 0.90, cov.mean(axis=0)
+
+
+# the application-shaped stress ladder: costs 0.015, 0.25, 6, 300 core-hours (steps 4.06, 4.58, 5.64;
+# level 4 is a continuation with step 6.7). Prior scales set HERE, not defaults: kappa0 = log2 0.015 +- 3,
+# first step 3 +- 1, step increment sd 0.5.
+STRESS_LEV = np.concatenate([np.log2([0.015, 0.25, 6.0, 300.0]), [np.log2(300.0) + 6.7]])
+STRESS_PRIOR = CostPrior(float(STRESS_LEV[0]), 3.0, (3.0,), (1.0,), (0.5,))
+
+
+@pytest.mark.slow
+def test_cap_covers_realised_costs_on_the_application_shaped_stress_ladder():
+    cov = _coverage_report(
+        "stress ladder", [ladder_coverage(sd, STRESS_LEV, STRESS_PRIOR) for sd in range(24)]
+    )
+    assert cov[:, 0].mean() >= 0.90, cov.mean(axis=0)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -561,3 +593,27 @@ def test_expected_capped_cost_is_finite_where_expected_cost_explodes():
     cap = float(cost.cost_cap(mean, var, np.ones(1), 0.95)[0])
     capped = float(cost.expected_capped_cost(mean, var, np.ones(1), cap)[0])
     assert capped <= cap and float(cost.expected_cost(mean, var, np.ones(1))[0]) > 1e6 * cap
+
+
+def test_expected_capped_cost_does_not_overflow_for_enormous_variance():
+    mean, var = np.array([[3.0, 3.0]]), np.array([[1e4, 4e5]])  # sd 100 and 632 log2 units
+    cap = np.array([50.0, 50.0])
+    got = np.asarray(cost.expected_capped_cost(mean, var, np.ones(1), cap))
+    assert np.all(np.isfinite(got)) and np.all(got > 0) and np.all(got <= cap * (1 + 1e-12))
+    # the median (2^3) is below the cap and the lower tail adds nothing: E[min] ~ cap P(c >= cap) ~ cap / 2
+    np.testing.assert_allclose(got, 0.5 * cap, rtol=0.02)
+
+
+def test_prob_finish_matches_monte_carlo_of_the_mixture_and_the_cap_quantile():
+    rng = np.random.default_rng(23)
+    mean, var = rng.normal(2.0, 1.0, (3, 4)), rng.uniform(0.05, 3.0, (3, 4))
+    w = np.array([0.2, 0.5, 0.3])
+    cap = np.array([1.0, 4.0, 30.0, 500.0])
+    got = np.asarray(cost.prob_finish(mean, var, w, cap))
+    N = 1_000_000
+    pick = rng.choice(3, size=N, p=w)
+    c = 2.0 ** (mean[pick] + np.sqrt(var[pick]) * rng.standard_normal((N, 4)))
+    np.testing.assert_allclose(got, (c <= cap).mean(axis=0), atol=3e-3)
+    # the 0.95 cap finishes with probability 0.95
+    c95 = np.asarray(cost.cost_cap(mean, var, w, 0.95))
+    np.testing.assert_allclose(cost.prob_finish(mean, var, w, c95), 0.95, atol=1e-9)

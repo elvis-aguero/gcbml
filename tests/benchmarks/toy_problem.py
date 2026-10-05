@@ -44,7 +44,7 @@ def toy_setup(rel_tol: float = 0.5) -> Setup:
         y_scale=1.0,
         rel_tol=rel_tol,
         scales=PriorScales(S_mu=1.0, S_c=0.5, S_delta=0.5, S_noise=0.02),
-        cost_prior=CostPrior(0.0, 1.0, (1.0,), (0.5,)),
+        cost_prior=CostPrior(0.0, 1.0, (1.0,), (0.5,), (0.3,)),
     )
 
 
