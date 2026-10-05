@@ -1,6 +1,6 @@
 """Issue 3: E[c] and 0.95 cap (core-hours) at levels 0-4 with zero, 1-level and 3-level data.
 
-usage: exp_cost_cap3.py VARIANT N_SEEDS     (VARIANT: base | q01 | cubic ; as in exp_cost_cap2.py)
+usage: exp_cost_cap3.py VARIANT N_SEEDS     (VARIANT: base = the model in src (cubic t_sd 0.1) | q01)
 True ladder: log2[0.015, 0.25, 6, 300] (levels 0-3); 10 runs per fitted level, noise sd 0.3 (log2). Medians over seeds.
 Prior: k0 = log2 0.015, sd 3; gamma 3 +- 1; q_sd 0.5 (base). Controls u = (0.5, 0.5).
 """
@@ -34,18 +34,21 @@ def one(seed, levels, q_sd, n_per=10, noise=0.3):
     Ln = np.arange(5.0)[:, None]
     mean, var = cost.predict_log2(post, np.full((5, 2), 0.5), Ln, np.zeros(5), np.zeros(5, bool))
     w = np.full(mean.shape[0], 1.0 / mean.shape[0])
-    return np.asarray(cost.expected_cost(mean, var, w)), np.asarray(cost.cost_cap(mean, var, w, 0.95))
+    cap = cost.cost_cap(mean, var, w, 0.95)
+    return (
+        np.asarray(cost.expected_cost(mean, var, w)),
+        np.asarray(cost.expected_capped_cost(mean, var, w, cap)),
+        np.asarray(cap),
+    )
 
 
 if __name__ == "__main__":
     variant, ns = sys.argv[1], int(sys.argv[2])
     q_sd = 0.1 if variant == "q01" else 0.5
-    if variant == "cubic":
-        e2.patch_cubic(0.1)
     print(f"variant={variant}  true cost levels 0-3: 0.015 0.25 6 300 core-h (median over {ns} seeds)")
     for name, levels in (("zero data", []), ("1 level (0)", [0]), ("3 levels (0-2)", [0, 1, 2])):
         r = [one(s, levels, q_sd) for s in range(ns)]
-        ec = np.median([a for a, _ in r], axis=0)
-        cap = np.median([b for _, b in r], axis=0)
+        ec, ecc, cap = (np.median([x[i] for x in r], axis=0) for i in range(3))
         print(f"{name:15s} E[c]: " + " ".join(f"{x:10.3g}" for x in ec))
+        print(f"{'':15s} E[min(c,cap)]: " + " ".join(f"{x:10.3g}" for x in ecc))
         print(f"{'':15s} cap : " + " ".join(f"{x:10.3g}" for x in cap))

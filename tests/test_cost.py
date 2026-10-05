@@ -513,8 +513,17 @@ def test_cap_coverage_of_unprobed_level_over_accelerating_ladders():
     res = np.array([ladder_coverage(sd) for sd in range(24)])
     cov, ratio = res[:, 0].mean(), np.median(res[:, 1])
     print(f"unprobed-level coverage of the 0.95 cap: {cov:.3f}; median E[c]/true: {ratio:.3f}")
-    assert cov >= 0.85, (cov, ratio)
+    assert cov >= 0.90, (cov, ratio)
     assert 0.5 < ratio < 2.0, ratio
+
+
+@pytest.mark.slow
+def test_cap_covers_realised_noisy_costs_at_the_unprobed_level_of_the_reviewer_ladder():
+    lev = np.log2([0.015, 0.25, 6.0, 300.0])
+    res = np.array([ladder_coverage(sd, lev_means=lev, n_per=10, n_new=200) for sd in range(24)])
+    cov = res[:, 0].mean()
+    print(f"reviewer ladder, realised-cost coverage of the 0.95 cap at level 3: {cov:.3f}")
+    assert cov >= 0.90, cov
 
 
 # ----------------------------------------------------------------------------------------------
