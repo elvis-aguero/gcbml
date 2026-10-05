@@ -621,11 +621,14 @@ def test_every_structure_has_its_own_noise_variance_for_new_rows():
 # ----------------------------------------------------------------------------------------------
 
 
-def _four_level_campaign(seed, preasymptotic=False):
+PRE_AMP = 1.5  # a large smooth term (the noise sd is 0.01, the signal sd 1); 5.0 is absorbed even more
+
+
+def _four_level_campaign(seed, preasymptotic=False, mcmc=(60, 50, 2)):
     """d = 1 A12 data at levels 0-3 (hbar 1 .. 1/8), noise 0.01. ``preasymptotic`` adds a large smooth term at
     hbar = 1 only, a coarsest level that is not in the asymptotic range."""
     t = A12Truth(seed, d=1, budget=1e9, eps_abs=0.01)
-    settings = dataclasses.replace(FAST, n_warmup=60, n_samples=50, n_chains=2, seed=seed)
+    settings = dataclasses.replace(FAST, n_warmup=mcmc[0], n_samples=mcmc[1], n_chains=mcmc[2], seed=seed)
     c = make(t, settings)
     o = t.oracle(seed=seed)
     res = []
@@ -639,7 +642,7 @@ def _four_level_campaign(seed, preasymptotic=False):
             o.submit([Probe(f"s{lev}_{i}", u, h, None)], [1e12])
             (r,) = o.poll()
             if preasymptotic and lev == 0:
-                r = dataclasses.replace(r, y=r.y + 1.5 * np.cos(7.0 * u[0]))
+                r = dataclasses.replace(r, y=r.y + PRE_AMP * np.cos(7.0 * u[0]))
             res.append(r)
     c.tell(res)
     return c
