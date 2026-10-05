@@ -1,4 +1,4 @@
-"""Timing and convergence of one full fit for A12 (picks warm-up/samples): prints seconds and rhat of log p0."""
+"""Timing and convergence of one full fit for A12 (picks warm-up/samples): seconds and rhat of log p0."""
 
 import sys
 import time
@@ -25,6 +25,7 @@ for wu, ns in [(int(a.split(",")[0]), int(a.split(",")[1])) for a in sys.argv[2:
         fits = c._fit_all(data, jax.random.PRNGKey(rep))
         lp = fits[0].post.theta["log_p0"][..., 0]
         print(
-            f"warmup {wu} samples {ns} rep {rep}: {time.time() - t0:.0f}s rhat(log p0) {dg.rhat(lp):.3f} true p {t.p:.2f}",
+            f"warmup {wu} samples {ns} rep {rep}: {time.time() - t0:.0f}s "
+            f"rhat(log p0) {dg.rhat(lp):.3f} true p {t.p:.2f}",
             flush=True,
         )
