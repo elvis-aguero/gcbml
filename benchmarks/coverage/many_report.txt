@@ -1,0 +1,10 @@
+/oscar/data/dharri15/eaguerov/Github/gcbml-wt/speed2/.venv/lib/python3.12/site-packages/numpy/_core/_methods.py:132: RuntimeWarning: invalid value encountered in reduce
+  ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
+40 datasets; flagged rhat >= 1.05: 4
+cell           n   pooled cov  mean per-ds cov (s.e.)  ds with cov<0.8  mean z^2   median |mean z|  truth log p in 95%
+prior 3-level  10      0.955     0.955 (0.045)            0.10           0.92       0.38          nan
+prior 4-level  10      0.717     0.717 (0.126)            0.40            inf        nan          nan
+a12   3-level  10      0.944     0.944 (0.016)            0.00           1.11       0.13          1.00
+a12   4-level  10      0.816     0.816 (0.085)            0.20            inf        nan          1.00
+prior: all 20 datasets: mean per-dataset coverage 0.836 +- 0.071 (s.e. over datasets)
+a12: all 20 datasets: mean per-dataset coverage 0.880 +- 0.045 (s.e. over datasets)

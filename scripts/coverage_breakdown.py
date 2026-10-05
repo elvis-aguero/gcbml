@@ -18,9 +18,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from scipy import stats
 
-TYPES = {"A12 3-level": range(0, 4), "A12 4-level": range(4, 8), "prior 3-level": range(8, 10), "prior 4-level": range(10, 12)}
+TYPES = {
+    "A12 3-level": range(0, 4),
+    "A12 4-level": range(4, 8),
+    "prior 3-level": range(8, 10),
+    "prior 4-level": range(10, 12),
+}
 res = {int(f.stem[3:]): json.loads(f.read_text()) for f in Path(sys.argv[1]).glob("ds_*.json")}
 Z = {}
 print("id  label                              n_x  mean z  sd z   cov2   cov1  max|z|  frac |z|>3")
@@ -28,19 +32,27 @@ for i in sorted(res):
     x = {k: np.array(v) for k, v in res[i]["x"].items()}
     z = (x["f0"] - x["m_mcmc"]) / x["s_mcmc"]
     Z[i] = z
-    print(f"{i:2d}  {res[i]['label']:34s} {len(z):3d} {z.mean():7.2f} {z.std():5.2f} {np.mean(abs(z) < 2):6.2f} {np.mean(abs(z) < 1):6.2f} {abs(z).max():7.2f} {np.mean(abs(z) > 3):6.2f}")
+    print(
+        f"{i:2d}  {res[i]['label']:34s} {len(z):3d} {z.mean():7.2f} {z.std():5.2f} {np.mean(abs(z) < 2):6.2f} {np.mean(abs(z) < 1):6.2f} {abs(z).max():7.2f} {np.mean(abs(z) > 3):6.2f}"
+    )
 print("\ntype            datasets  coverage(2 sigma)  coverage(1 sigma)  sd of z  [per-dataset coverage]")
 for name, ids in TYPES.items():
     z = np.concatenate([Z[i] for i in ids])
     per = [np.mean(abs(Z[i]) < 2) for i in ids]
-    print(f"{name:14s} {len(ids):5d}     {np.mean(abs(z) < 2):8.3f}          {np.mean(abs(z) < 1):8.3f}        {z.std():5.2f}   {np.round(per, 2).tolist()}")
+    print(
+        f"{name:14s} {len(ids):5d}     {np.mean(abs(z) < 2):8.3f}          {np.mean(abs(z) < 1):8.3f}        {z.std():5.2f}   {np.round(per, 2).tolist()}"
+    )
 allz = np.concatenate(list(Z.values()))
 print(f"\nall: coverage {np.mean(abs(allz) < 2):.3f}")
 # binomial error with the dataset count as the sample size: mean of per-dataset coverages, s.e. across datasets
 for name, ids in {"A12": range(0, 8), "prior": range(8, 12)}.items():
     per = np.array([np.mean(abs(Z[i]) < 2) for i in ids])
     se = per.std(ddof=1) / np.sqrt(len(per))
-    print(f"{name}: mean per-dataset coverage {per.mean():.3f} +- {se:.3f} (s.e. over {len(per)} datasets); "
-          f"target 0.954; t = {(per.mean() - 0.954) / se:.2f}")
+    print(
+        f"{name}: mean per-dataset coverage {per.mean():.3f} +- {se:.3f} (s.e. over {len(per)} datasets); "
+        f"target 0.954; t = {(per.mean() - 0.954) / se:.2f}"
+    )
 # a Gaussian posterior would give share |z|<2 of 0.954 per point; the shares of the z-scores themselves
-print("\nFor reference: sigma = (q84 - q16)/2 of a Gaussian equals its sd, so 0.954 is the target at each point.")
+print(
+    "\nFor reference: sigma = (q84 - q16)/2 of a Gaussian equals its sd, so 0.954 is the target at each point."
+)

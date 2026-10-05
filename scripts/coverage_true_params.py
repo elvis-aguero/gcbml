@@ -10,12 +10,11 @@ here, the data are not drawn from the model that the code evaluates.
 
 import sys
 
-import jax
 import jax.numpy as jnp
 import numpy as np
+import quad_vs_mcmc as qv
 
 import gcbml  # noqa: F401
-import quad_vs_mcmc as qv
 from gcbml import inference, model
 
 n_cell = int(sys.argv[1])
@@ -32,6 +31,8 @@ for nl in (3, 4):
         per.append(np.mean(abs(z) < 2))
     Z = np.concatenate(zs)
     mz = np.array([z.mean() for z in zs])
-    print(f"{nl}-level: {n_cell} datasets, pooled coverage {np.mean(abs(Z) < 2):.3f}, per-dataset mean {np.mean(per):.3f} "
-          f"(s.e. {np.std(per, ddof=1) / np.sqrt(n_cell):.3f}), E z^2 {np.mean(Z**2):.2f}, sd of per-dataset mean z {mz.std():.2f}, "
-          f"datasets with cov < 0.8: {np.mean(np.array(per) < 0.8):.2f}, max|z| {abs(Z).max():.1f}")
+    print(
+        f"{nl}-level: {n_cell} datasets, pooled coverage {np.mean(abs(Z) < 2):.3f}, per-dataset mean {np.mean(per):.3f} "
+        f"(s.e. {np.std(per, ddof=1) / np.sqrt(n_cell):.3f}), E z^2 {np.mean(Z**2):.2f}, sd of per-dataset mean z {mz.std():.2f}, "
+        f"datasets with cov < 0.8: {np.mean(np.array(per) < 0.8):.2f}, max|z| {abs(Z).max():.1f}"
+    )
