@@ -207,12 +207,15 @@ $$ e_a \sim N(0, S_a), \quad S_a = D_a R_a D_a $$
 
 ### 2.6 Cost model
 
-$$ \log_2 \kappa(u, h) = \kappa_0 + \sum_j \gamma_j \ell_j + \omega(u, h) + \eta $$
+The model is learned from the costs that the oracle reports for each run (core-hours, or any work unit):
 
-- \(\kappa\) is the cost per unit of run length, and \(c(a) = \kappa (T_{fixed} + T_{obs}) + c_0\).
-- \(\omega\) is a GP. So the posterior can depart from the power law \(2^{\gamma \ell}\), which is only the prior mean. \(\gamma_j \sim N(3, 1)\) [assumption: 2D explicit time stepping, 4× cells and about 2× steps per level].
+$$ \log_2 c = \kappa_0 + \sum_j (\gamma_j \ell_j + q_j \ell_j^2 + t_j \ell_j^3) + a \, (\log_2 \hat c - \bar q) + \omega(u, \ell) + \eta $$
+
+- \(\ell_j\) is the level index of component \(j\) (0 = coarsest); \(\hat c\) is the oracle's optional cost quote (the term is absent without one; \(\bar q\) centres it). The oracle decides how to run a probe (warm starts, checkpoints), so its savings appear in the reported costs.
+- The polynomial in \(\ell\) is only the prior mean; \(\omega\) is a GP, so the posterior can depart from it. Priors: \(\kappa_0, \gamma_j\) Gaussian with problem-specific means and sds (required inputs); \(q_j \sim N(0, 0.5^2)\) and \(t_j \sim N(0, 0.1^2)\) [assumption]: with only the linear and quadratic terms, the 0.95 cap covered 84% of realised costs at the first unprobed level of an accelerating ladder (structural bias); the cubic term raises this to 96% at the cost of a wider cap. \(a \sim N(1, 0.5^2)\): a quote is informative but not trusted.
+- The linear coefficients and \(\omega\) are integrated out exactly; the GP hyperparameters are slice-sampled; a run stopped at its cap gives a right-censored cost (Tobit, by data augmentation).
+- **The cost a run is charged is \(\min(c, \bar c)\)**, because a run is stopped at its cap \(\bar c\). The acquisition and the forecast therefore use \(E[\min(c, \bar c)]\), not \(E[c]\): for a lognormal predictive with a wide extrapolation variance, \(E[c]\) is dominated by a far tail that is never paid (with no cost data it reached \(10^{11}\) at an unprobed level).
 - Snoek 1206.2944 §3.2 puts a GP on log cost. Guinet 2011.11456 reports that simple cost models often predict better, so the prior mean carries most of the weight when data are few.
-- **When the output is a time** (the run length needed is the unknown output): Hutter 1310.1947 Def. 1. The expected observed time is \(E[T_{obs}] = \int_0^T P_n(\tau > t) dt\).
 
 ### 2.7 Several candidate structures
 
@@ -304,7 +307,7 @@ $$ a^\star = \arg\max_{a \in A} \; (H_n - E J_n(a)) / E c(a), \qquad H_n = \sum_
 - The ratio is MR-SUR (Stroh et al. 2007.13553 eq 11), with a hinge on \(H_n\) [inference], which is zero exactly when P1 holds.
 - **P2 criterion.** When the forecast says P1 is infeasible, \(H_n\) becomes a soft maximum, \(\beta^{-1} \log \sum_{x \in \Sigma_N} \exp(\beta \sigma_{epi}^2/\varepsilon^2)\) with \(\beta = 20\) [inference]. This targets the max of P2 rather than a sum.
 - **Budget enforcement.**
-  - Every candidate gets a cap \(\bar c(a)\), the 0.95 quantile of its cost posterior. A candidate is admissible only if \(\bar c(a) \le C_{rem}\), where \(C_{rem}\) is the budget minus the spent cost and minus the caps of all pending runs (each pending run is reserved at its cap).
+  - Every candidate gets a cap \(\bar c(a)\), the 0.95 quantile of its cost posterior. Its cost in the ratio below is \(E c(a) := E[\min(c(a), \bar c(a))]\) (Section 2.6). A candidate is admissible only if \(\bar c(a) \le C_{rem}\), where \(C_{rem}\) is the budget minus the spent cost and minus the caps of all pending runs (each pending run is reserved at its cap).
   - A run that reaches its cap is stopped. Its cost is counted, and it is a right-censored cost datum: the cost model (Section 2.6) uses a censored (Tobit) likelihood for it. The outputs it reached are kept; outputs not reached are censored (module S1). In the generic case with one output, a capped run gives only the cost datum. With module S2, it can be extended later if budget remains.
   - So \(\sum c \le C\) holds by construction.
 - **Not optimal.** The policy is greedy, with a one-step look-ahead. It does not claim to minimise \(\sum c\) (P1) or to reach the P2 optimum. It is a heuristic in the class of MR-SUR.
