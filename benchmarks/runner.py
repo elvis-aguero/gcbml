@@ -79,7 +79,7 @@ def run_task(
     if out.exists():
         return out
     out.parent.mkdir(parents=True, exist_ok=True)
-    setup = setup or get_setup(problem)
+    setup = setup or get_setup(problem, config.SMOKE_REL_TOL if fast else None)
     settings = config.fast_settings() if fast else config.default_settings()
     cert = cert_root if cert_root is not None else root
     budget = budget_for(problem, kappa, fast, cert, setup)

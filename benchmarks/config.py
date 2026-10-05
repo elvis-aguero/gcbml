@@ -35,6 +35,9 @@ TRAP = "b7_thin_layer"
 KAPPAS = (1.5, 2.0, 4.0)
 N0_PER_CONTROL = (8, 16, 32)
 LEVELS = (2, 3, 4, 5, 6, 7)
+SMOKE_REL_TOL = (
+    0.5  # fast (smoke) runs use a loose tolerance so that a certificate exists after one short fit
+)
 
 # problem -> (M, relative tolerance eps, S_noise)
 _TABLE = {
