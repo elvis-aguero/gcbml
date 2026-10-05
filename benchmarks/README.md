@@ -59,3 +59,28 @@ Minimum of 3 runs at the centre of each design region, from `benchmarks/measure_
 - **B5.** For the test input a = 0.422, a/h has binary fraction 0.008 * 2^l, so the error doubles relative to h and is roughly constant for several levels: its size depends on the binary digits of a. The only guaranteed property is |error| <= j h / 2 plus the smooth O(h^2) part.
 - **B6.** Pass `Probe.h = (dx, dt/T)`. `expected_order` is 1.0 (the lower one); `expected_orders` is (2.0, 1.0). Spatial order is only asymptotic from dx = 1/16 (2.59 at dx = 1/8 to 1/16 on one input); the dt order needs at least 16-32 steps per horizon (1.23, 1.15, 1.08 for 16 to 256 steps on that input; 0.96 to 0.99 for 64 to 1024 steps).
 - **B7.** For example at a = 0.386, A = 1.25, w = 6e-4: levels 0-2 give about 1e-74, level 3 gives 2.4e-15, level 4 gives 7e-9, level 5 gives 2.4e-3, level 6 gives 1.5e-3, level 8 and up give the truth 1.88e-3. Successive coarse values agree to 1e-74 while the truth is 1.88e-3. When a stray node falls near the source, coarse levels instead show an apparent first-order convergence to zero (values halve with h) while the truth is 17 times larger than the last change.
+
+# Benchmark machinery (PROTOCOL.md)
+
+Modules: `oracle.py` (BenchmarkProblem behind quote/submit/poll; cost = work with seeded noise; a run at its cap returns cost = cap, `cost_censored`, no outputs; a function of (seed, probe_id)), `config.py` (units, eps, prior scales, cost prior), `design.py` (nested Sobol static designs, `fit_static`), `certificate.py`, `baselines.py` + `gp.py`, `metrics.py`, `runner.py`, `submit.py`, `report.py`.
+
+Units: the oracle returns y / M (M = 5, 1, 0.3, 1, 0.5, 0.002 for B1, B2, B4, B5, B6, B7: one significant digit of the QoI scale), so the same prior scales (S_mu 1, S_c 0.5, S_delta 0.5, S_noise 0.02; B4: 0.1) serve both output transforms. The cost prior uses the problem's work exponent. B3 is not run: it has an output coordinate v and Campaign v1 requires n_controls == d.
+
+## Tolerance table (proposal; one table)
+
+| problem | eps (relative) | C* (work units) | certificate design | status |
+|---|---|---|---|---|
+| b1_poisson | 0.01 (placeholder) | not yet | - | scan in progress: cheapest design (n0 = 24, L = 2, cost 489) has max sigma_epi / abs(m_y) = 0.21 |
+| b2_upwind | 0.01 (placeholder) | not yet | - | cheapest design (n0 = 24, L = 2, cost 75): 0.198, coverage 0.947 < 0.95 |
+| b4_sde, b5_kink, b6_heat | 0.05, 0.01, 0.01 (placeholders) | not yet | - | not fitted |
+| b7_thin_layer | 0.01 | none by construction | budget = 0.5 x cost of the n0 = 8 n_controls design with finest level 8 | |
+
+`certificate.py` stores max sigma_epi / abs(m_y) per fitted design, so one fit answers for every eps (`derive`). One default-settings fit costs 13 to over 40 minutes on 4 cores, so the certificates are scanned (`--stride k`) and the eps chosen from the measured curve; they are provisional until gcbml stops changing.
+
+## Methods and their settings (`baselines.py`)
+
+All share `BenchmarkOracle`, the budget kappa C* and the tolerance. Fixed-design baselines plan with the noise-free work and spend on the finest affordable level: (a) 8 n_controls sites; (b) 4 / 8 n_controls sites at the two finest levels; (c) 8 n_controls sites at the three finest levels; (e) the dearest family design that fits. gcbml: `Campaign` + `run_campaign`, `CampaignSettings(seed=seed)`. (d): `h_kernels=("twy2",)`, prior on log p with median log(expected order) and sd 0.02 (p fixed through its prior; MAP is not available in the public API). (f): `h_kernels=("lb",)` (gamma learned, target h = 0: not Stroh as specified). (b) needs numpy < 2 and is left out of the manifests here.
+
+## Running
+
+`uv run python -m benchmarks.certificate --problem b1_poisson --stride 5`; `uv run python -m benchmarks.submit --mode smoke` (B1, kappa 1.5, seed 1, fast settings, results in `results/fast`); `--mode full` (not to be submitted until gcbml settles); `uv run python -m benchmarks.report [--fast]`.
