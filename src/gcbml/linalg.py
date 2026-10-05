@@ -49,7 +49,7 @@ def _mask_matrix(K, mask):
     return jnp.where(both, K, 0.0) + jnp.diag(jnp.where(mask, 0.0, 1.0))
 
 
-def _cholesky_ladder(Km, mask, scale):
+def _cholesky_ladder_impl(Km, mask, scale):
     """Cholesky of Km + jitter * scale * diag(mask), with jitter walked up the ladder until it is finite.
 
     Returns (L, jitter * scale). If the last rung fails too, L is non-finite.
@@ -69,6 +69,27 @@ def _cholesky_ladder(Km, mask, scale):
 
     i, L = jax.lax.while_loop(cond, body, (0, attempt(0)))
     return L, _LADDER[i] * scale
+
+
+@jax.custom_jvp
+def _cholesky_ladder(Km, mask, scale):
+    """_cholesky_ladder_impl with a derivative: a lax.while_loop cannot be reverse-differentiated.
+
+    The tangent is that of jnp.linalg.cholesky at the jittered matrix that the ladder settled on, with the
+    jitter held constant (its dependence on K is of the order of the jitter, <= 1e-4 of the mean variance and
+    0 whenever the plain factor exists). The primal output is unchanged, so the samplers are not affected.
+    """
+    return _cholesky_ladder_impl(Km, mask, scale)
+
+
+@_cholesky_ladder.defjvp
+def _cholesky_ladder_jvp(primals, tangents):
+    Km, mask, scale = primals
+    dKm = tangents[0]
+    L, jit = _cholesky_ladder_impl(Km, mask, scale)
+    Kj = Km + jit * jnp.diag(jnp.where(mask, 1.0, 0.0))
+    _, dL = jax.jvp(jnp.linalg.cholesky, (Kj,), (dKm,))
+    return (L, jit), (dL, jnp.zeros_like(jit))
 
 
 def factor(K: jnp.ndarray, mask: jnp.ndarray) -> Factor:
