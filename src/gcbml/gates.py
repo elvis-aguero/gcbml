@@ -39,13 +39,13 @@ g3_noise(groups: list of arrays of Lambda(y) of runs at the same site, s2_mean p
     T = sum_g sum_r (x_gr - xbar_g)^2 / s2_g ~ chi-square(sum_g (n_g - 1)) for fixed s2 and Gaussian noise;
     pass if the TWO-SIDED p = 2 min(cdf, sf) > 0.05 [assumption: two-sided]; "not testable" without
     replicates (no group with n_g >= 2). s2_mean is the posterior mean of the group's s^2, used as a plug-in.
-g4_pre_asymptotic(m_full (s,), sigma_epi_full (s,), m_without_coarsest (s,) or None)
-    the target moves less than sigma_epi at every x of Sigma_N (strict); else "fail" with the advice
-    "remove the coarsest level". None (nothing to remove) -> "not testable".
+g4_pre_asymptotic(m_full (s,), sigma_epi_full (s,), m_without_coarsest (s,) or None, sigma_epi_without (s,))
+    z = dm / sqrt(max(sigma_w^2 - sigma_f^2, (0.1 sigma_f)^2)); "fail" if > 10% of Sigma_N has |z| > 2.5,
+    with the advice "remove the coarsest level". None (nothing to remove) -> "not testable".
 g5_monotone(median_curve (s,), direction, tol=0.0) no violation along a declared monotone coordinate (the
     curve is ordered along it); direction "increasing" | "decreasing" (or +1 | -1); None -> "not testable".
-g6_shape(draws (S, s) physical, w) |q025 - (m - 1.96 sigma)| and |q975 - (m + 1.96 sigma)| < 0.1 sigma at
-    every x, with m the median and sigma = (q84 - q16) / 2 as in predict.summarize (identity transform).
+g6_shape(draws (S, s) physical, w) median over x of max(|q025 - (m - 1.96 sigma)|, |q975 - (m + 1.96 sigma)|)
+    / sigma < 0.2, with m the median and sigma = (q84 - q16) / 2 as in predict.summarize (identity transform).
     A Gaussian has sigma = 0.9945 sd, so even exact Gaussian draws differ by 0.011 sigma.
 g7_prior(log_prior_ratio_fn, draws, w, transform, scenarios, theta=None) halve and double each prior scale:
     log_prior_ratio_fn(scenario, theta) -> (S,) log pi_new(theta_s) - log pi_old(theta_s) for each scenario
@@ -310,14 +310,33 @@ def g3_noise(groups, s2_mean, *, alpha: float = 0.05) -> GateResult:
 # ----------------------------------------------------------------------------------------------
 
 
-def g4_pre_asymptotic(m_full, sigma_epi_full, m_without_coarsest) -> GateResult:
+def g4_pre_asymptotic(
+    m_full,
+    sigma_epi_full,
+    m_without_coarsest,
+    sigma_epi_without=None,
+    *,
+    z_max: float = 2.5,
+    frac_max: float = 0.1,
+    floor: float = 0.1,
+) -> GateResult:
+    """z = dm / sqrt(max(sigma_w^2 - sigma_f^2, (floor sigma_f)^2)) at every x of Sigma_N (spec Step 3, G4).
+
+    Under the model, adding data changes a posterior mean by a quantity of variance sigma_w^2 - sigma_f^2
+    (w: without the coarsest level, f: full). Fail if more than ``frac_max`` of the points have |z| > z_max.
+    ``sigma_epi_without=None`` is taken as sigma_f (only the floor sets the scale).
+    """
     if m_without_coarsest is None:
         return GateResult("G4", "not testable", dict(reason="no level can be removed"))
-    ratio = np.abs(np.asarray(m_without_coarsest, float) - np.asarray(m_full, float)) / np.asarray(
-        sigma_epi_full, float
+    sf = np.asarray(sigma_epi_full, float)
+    sw = sf if sigma_epi_without is None else np.asarray(sigma_epi_without, float)
+    dm = np.asarray(m_without_coarsest, float) - np.asarray(m_full, float)
+    z = dm / np.sqrt(np.maximum(sw**2 - sf**2, (floor * sf) ** 2))
+    frac = float(np.mean(np.abs(z) > z_max))
+    ok = frac <= frac_max
+    st = dict(
+        z=z, max_abs_z=float(np.max(np.abs(z))), frac_exceed=frac, n_violations=int(np.sum(np.abs(z) > z_max))
     )
-    ok = bool(np.all(ratio < 1.0))
-    st = dict(ratio=ratio, max_ratio=float(ratio.max()), n_violations=int(np.sum(ratio >= 1.0)))
     if not ok:
         st["advice"] = "remove the coarsest level"
     return GateResult("G4", _status(ok), st)
@@ -334,7 +353,12 @@ def g5_monotone(median_curve, direction=None, tol: float = 0.0) -> GateResult:
     )
 
 
-def g6_shape(draws, w, *, tol: float = 0.1) -> GateResult:
+def g6_shape(draws, w, *, tol: float = 0.2) -> GateResult:
+    """Median over the points of max(|q025 - (m - 1.96 s)|, |q975 - (m + 1.96 s)|) / s must be below ``tol``.
+
+    A warning in the report, not a blocking gate (spec): s is a quantile half-width and P1 does not assume a
+    Gaussian. stats: rel_diff (s,) per point, median_rel_diff, rel_diff_lo, rel_diff_hi.
+    """
     from gcbml import transforms
 
     s = predict.summarize(
@@ -345,10 +369,12 @@ def g6_shape(draws, w, *, tol: float = 0.1) -> GateResult:
         return GateResult("G6", "not testable", dict(reason="zero or non-finite spread"))
     lo = np.abs(np.asarray(s["q025"]) - (m - 1.96 * sig)) / sig
     hi = np.abs(np.asarray(s["q975"]) - (m + 1.96 * sig)) / sig
+    rel = np.maximum(lo, hi)
+    med = float(np.median(rel))
     return GateResult(
         "G6",
-        _status(bool(np.all(lo < tol) and np.all(hi < tol))),
-        dict(rel_diff_lo=lo, rel_diff_hi=hi, m=m, sigma=sig),
+        _status(med < tol),
+        dict(rel_diff=rel, median_rel_diff=med, rel_diff_lo=lo, rel_diff_hi=hi, m=m, sigma=sig),
     )
 
 
