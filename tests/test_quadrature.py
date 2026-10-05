@@ -35,8 +35,16 @@ def quad(data, zp, cfg=CFG, **kw):
 
 @pytest.fixture(scope="module")
 def small():
+    """Full default fit (two passes of 20 nodes): slow tests only."""
     data, zp, mu_true = make(8, 6, 4, 3)
     return data, zp, mu_true, quad(data, zp)
+
+
+@pytest.fixture(scope="module")
+def tiny():
+    """Single pass, 4 explicit nodes: the fast smoke tests."""
+    data, zp, mu_true = make(5, 4, 3, 2)
+    return data, zp, mu_true, quad(data, zp, grid=np.linspace(-1.0, 1.0, 4)[:, None])
 
 
 def test_grid_is_20_equal_steps_over_the_central_99_percent():
@@ -59,6 +67,7 @@ def test_grid_two_components_is_a_snake_tensor_grid_and_three_raise():
         quadrature.log_p_grid(ti.SCALES, 3)
 
 
+@pytest.mark.slow
 def test_optimum_is_a_stationary_point_below_the_start(small):
     data, zp, _, post = small
     sampler = inference._Sampler(data, zp, zp, CFG, ti.SCALES, 1, False)
@@ -72,6 +81,7 @@ def test_optimum_is_a_stationary_point_below_the_start(small):
     assert bool(one.converged[0])
 
 
+@pytest.mark.slow
 def test_plugin_log_post_matches_node_of_the_grid(small):
     data, zp, _, post = small
     k = 9  # a node near the middle
@@ -80,36 +90,36 @@ def test_plugin_log_post_matches_node_of_the_grid(small):
     assert abs(one.log_post[0] - post.log_post[k]) < 0.05, (one.log_post[0], post.log_post[k])
 
 
-def test_weights_are_a_normalised_softmax_of_log_post(small):
-    *_, post = small
+def test_weights_are_a_normalised_softmax_of_log_post(tiny):
+    *_, post = tiny
     w = np.asarray(post.weights)
-    assert w.shape == (20,) and abs(w.sum() - 1.0) < 1e-12 and np.all(w >= 0)
+    assert w.shape == (4,) and abs(w.sum() - 1.0) < 1e-12 and np.all(w >= 0)
     ref = np.exp(post.log_post - post.log_post.max())
     np.testing.assert_allclose(w, ref / ref.sum(), rtol=1e-12)
 
 
-def test_output_has_the_structure_of_inference_posterior(small):
-    data, zp, _, post = small
+def test_output_has_the_structure_of_inference_posterior(tiny):
+    data, zp, _, post = tiny
     n_pad = data.X.shape[0]
-    assert post.params.c0.shape == (1, 20, 1)
-    assert post.params.P.shape == (1, 20, n_pad, 1)
-    assert post.params.noise_var.shape == (1, 20, n_pad)
-    assert post.z.shape == (1, 20, n_pad)
+    assert post.params.c0.shape == (1, 4, 1)
+    assert post.params.P.shape == (1, 4, n_pad, 1)
+    assert post.params.noise_var.shape == (1, 4, n_pad)
+    assert post.z.shape == (1, 4, n_pad)
     params, z = inference.flatten(post)  # the unchanged flatten
-    assert z.shape == (20, n_pad) and params.sigma_mu.shape == (20,)
+    assert z.shape == (4, n_pad) and params.sigma_mu.shape == (4,)
     np.testing.assert_allclose(np.log(np.asarray(params.P[:, 0, 0])), post.log_p[:, 0], rtol=1e-12)
     assert set(post.theta) >= {"log_p0", "log_sigma_z", "log_ell_z", "log_sigma_mu"}
 
 
-def test_prediction_is_the_weighted_mixture_of_exact_gaussians(small):
-    data, zp, _, post = small
+def test_prediction_is_the_weighted_mixture_of_exact_gaussians(tiny):
+    data, zp, _, post = tiny
     mean, var = quadrature.mu_moments(post, data, CFG, ti.XS)
-    assert mean.shape == (20, 5) and np.all(var >= 0)
+    assert mean.shape == (4, 5) and np.all(var >= 0)
     # brute force: one node by model.predict_mu on its own parameters
     params, z = inference.flatten(post)
-    p7 = jax.tree_util.tree_map(lambda a: a[7], params)
-    m7, v7 = model.predict_mu(p7, data, z[7], CFG, jnp.asarray(ti.XS))
-    np.testing.assert_allclose(mean[7], np.asarray(m7), rtol=1e-10)
+    p7 = jax.tree_util.tree_map(lambda a: a[2], params)
+    m7, v7 = model.predict_mu(p7, data, z[2], CFG, jnp.asarray(ti.XS))
+    np.testing.assert_allclose(mean[2], np.asarray(m7), rtol=1e-10)
     # mixture quantiles against a brute-force CDF root find
     q = quadrature.mixture_quantiles(post.weights, mean, var, [0.16, 0.5, 0.84])
     from scipy.optimize import brentq
@@ -141,8 +151,8 @@ def test_decompose_is_the_law_of_total_variance():
     np.testing.assert_allclose(tot, ev + vm, rtol=1e-12)
 
 
-def test_equal_weight_bridge_reproduces_the_weights(small):
-    *_, post = small
+def test_equal_weight_bridge_reproduces_the_weights(tiny):
+    *_, post = tiny
     eq = quadrature.to_equal_weight(post, 400)
     assert eq.z.shape[:2] == (1, 400)
     lp = np.asarray(eq.theta["log_p0"]).reshape(400, 1)
@@ -159,6 +169,7 @@ def test_varying_order_is_not_supported_and_censoring_raises():
         quad(bad, zp)
 
 
+@pytest.mark.slow
 def test_second_pass_refines_the_range_of_the_first(small):
     *_, post = small
     g1, w1 = post.pass1["pass1_grid"][:, 0], post.pass1["pass1_weights"]
@@ -171,6 +182,7 @@ def test_second_pass_refines_the_range_of_the_first(small):
     assert len(g2) == 20 and np.allclose(np.diff(g2), np.diff(g2)[0])
 
 
+@pytest.mark.slow
 def test_brownian_option_pins_gamma_and_has_no_gamma_parameter():
     data, zp, _ = make(5, 4, 3, 2)
     cfg = ModelConfig(h_kernel="lb", gamma_fixed=0.5)
@@ -214,6 +226,7 @@ def richardson(n_levels, n_sites, seed=11):
     return data, zp
 
 
+@pytest.mark.slow
 def test_weight_mass_concentrates_near_the_true_p_as_data_increase():
     """1-D Richardson truth (p0 = 1.5 known): the pass-1 weight mass within +-0.35 of log p0 grows with
       the data
