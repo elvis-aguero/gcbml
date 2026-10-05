@@ -73,7 +73,7 @@ from gcbml import linalg, noise
 from gcbml.data import PaddedData
 from gcbml.kernels import DeltaParams, ard_matern
 from gcbml.mcmc import diagnostics as dg
-from gcbml.mcmc.chains import map_chains, run_chains
+from gcbml.mcmc.chains import chain_map, make_phase, run_chains
 from gcbml.mcmc.elliptical import ess_step
 from gcbml.mcmc.slice import slice_step
 from gcbml.mcmc.surrogate import surrogate_slice_step
@@ -495,22 +495,44 @@ class _Sampler:
 
 @functools.lru_cache(maxsize=32)
 def _runner(template: _Sampler, n_warmup: int, n_samples: int, n_chains: int):
-    """One jitted program: starting rule, warm-up (width adaptation), sampling, constrained parameters.
+    """Starting rule, warm-up (width adaptation), sampling, constrained parameters.
 
-    The data values enter as arguments, so a second dataset of the same shapes reuses the compiled
-    program (the template only fixes the static structure).
+    Every stage is a compiled program mapped over the chains by mcmc.chains (chain_map: one single-chain
+    program per chain, run in parallel threads). The data values enter as arguments, so a second dataset
+    of the same shapes reuses the compiled programs (the template only fixes the static structure).
     """
 
-    def run(aux, key):
+    def init_one(key, aux):
         smp = template.with_aux(aux)
+        st, n = smp.init_state(key)
+        return st, n, jnp.isfinite(smp.log_density(st))
+
+    init_all = chain_map(init_one, n_chains, 1)
+    phase = make_phase(
+        lambda w, aux: template.with_aux(aux).make_step(w), max(n_warmup, n_samples, 1), n_chains
+    )
+    constrain_all = chain_map(
+        lambda samples, aux: jax.vmap(template.with_aux(aux).constrain)(samples), n_chains, 1
+    )
+
+    def run(aux, key):
         k_init, k_run = jax.random.split(key)
-        init, n_init = map_chains(smp.init_state, n_chains)(jax.random.split(k_init, n_chains))
-        finite = map_chains(lambda st: jnp.isfinite(smp.log_density(st)), n_chains)(init)
-        res = run_chains(k_run, init, smp.make_step, smp.init_widths(), n_warmup, n_samples, n_chains)
-        params = map_chains(jax.vmap(smp.constrain), n_chains)(res.samples)
+        init, n_init, finite = init_all(jax.random.split(k_init, n_chains), aux)
+        res = run_chains(
+            k_run,
+            init,
+            None,
+            template.init_widths(),
+            n_warmup,
+            n_samples,
+            n_chains,
+            phase=phase,
+            extra=(aux,),
+        )
+        params = constrain_all(res.samples, aux)
         return res, params, jnp.sum(n_init), finite
 
-    return jax.jit(run)
+    return run
 
 
 def _template_key(sampler: _Sampler):
