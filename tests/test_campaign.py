@@ -441,7 +441,7 @@ def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
         n_warmup=150,
         n_samples=100,
         n_chains=4,
-        q=3,
+        q=10,
         n_candidates_u=16,
         extra_levels=2,
         h_kernels=("twy2", "lb"),
