@@ -85,6 +85,9 @@ How it is computed (W4-B) and where it differs from the stubs:
     first greedy step as a GainTable of arrays, indexed by field name), ess_min, n_fantasy_start/max.
     Each candidate can be chosen once per batch (list replicates as separate candidates). A batch ends early
     when no admissible candidate has a positive gain.
+  * StructurePosterior.noise_var (optional callable Candidate -> (m,) or (S_k, m)) gives the noise variance of
+    new rows in THAT structure's Lambda units; when None the Candidate.noise_var is used for every structure
+    (only right when all structures share one transform).
   * Candidate.noise_var: (m,), or (S_k, m) with S_k the number of draws of EACH structure (per-draw noise).
     New rows take the order P[0] of each draw, hbar = Candidate.hbar for all m rows, and form a run of their
     own (their noise is independent of the data's). Candidate.levels is not used here.
@@ -128,6 +131,9 @@ class StructurePosterior(NamedTuple):
     cfg: Any
     transform: Any
     weight: float
+    noise_var: Any = (
+        None  # optional callable Candidate -> (m,) or (S_k, m): this structure's own noise variance
+    )
 
 
 class GainDetail(NamedTuple):
@@ -369,7 +375,11 @@ def _build_pool(structures, data, Xs, cands, max_draws=None) -> _Pool:
         params = jax.tree_util.tree_map(lambda a, take=take: jnp.asarray(a)[take], st.params)
         z = jnp.asarray(st.z)[take]
         nv = jnp.concatenate(
-            [_draw_noise(c.noise_var, take, m) for c, m in zip(cands, ms, strict=True)], axis=1
+            [
+                _draw_noise(c.noise_var if st.noise_var is None else st.noise_var(c), take, m)
+                for c, m in zip(cands, ms, strict=True)
+            ],
+            axis=1,
         )
         mean, cov = _build_struct(params, z, dX, dH, drun, dmask, Xs, Xn, Hn, grp, nv, st.cfg)
         means.append(mean)
@@ -609,7 +619,10 @@ def _evaluate(key, pool, blocks, costs, eps, mode, ess_min, n0, nmax):
         def run(job):
             i, n, k = job
             g, f = _gain_samples(k, pool, blocks[i], eps, n, mode, ess_min)
-            return i, np.asarray(g), np.asarray(f)
+            g = np.asarray(g)
+            # a non-finite gain (H infinite before or after: an unbounded sigma_epi) carries no information
+            # about the candidate; counting it as 0 keeps the s.e. and the stopping rule finite (spec Step 5)
+            return i, np.where(np.isfinite(g), g, 0.0), np.asarray(f)
 
         with ThreadPoolExecutor(max_workers=_n_threads()) as ex:
             for i, g, f in ex.map(run, keyed):

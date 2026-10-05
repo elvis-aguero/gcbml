@@ -19,6 +19,8 @@ from gcbml.data import PaddedData
 from gcbml.kernels import DeltaParams
 from gcbml.model import ModelConfig, ModelParams
 
+pytestmark = pytest.mark.filterwarnings("error")  # warnings are errors in this module
+
 Z84 = float(stats.norm.ppf(0.84))  # the 16/84 quantile half-width of a Gaussian is Z84 * sd, not sd
 
 # ----------------------------------------------------------------------------------------------
@@ -543,3 +545,46 @@ def test_five_greedy_steps_shrink_the_worst_sigma_epi_over_eps():
     print("max sigma_epi / eps per step:", np.round(worst, 3), "weights", np.round(w, 3))
     assert worst[-1] < worst[0]
     assert worst[1] < worst[0]
+
+
+# ----------------------------------------------------------------------------------------------
+# Noise variance of new rows per structure (units depend on the structure's transform)
+# ----------------------------------------------------------------------------------------------
+
+
+def test_each_structure_uses_its_own_noise_variance_for_new_rows():
+    (s_id,), data = world(transform="identity")
+    (s_log,), _ = world(transform="log")
+    c = cand(0.5, 0.5, nv=1e-3)
+    base = acq._build_pool([s_id, s_log], data, XS, [c])  # candidate noise for both
+    # identity noise 1e-3 (physical units); the log structure needs a relative variance, 4e-6
+    f_id = lambda cd: np.array([1e-3])  # noqa: E731
+    f_log = lambda cd: np.array([4e-6])  # noqa: E731
+    mixed = acq._build_pool([s_id._replace(noise_var=f_id), s_log._replace(noise_var=f_log)], data, XS, [c])
+    r = int(mixed.rows[0][0])
+    d0 = [float(jnp.mean(jnp.diagonal(cv, axis1=1, axis2=2)[:, r])) for cv in base.cov]
+    d1 = [float(jnp.mean(jnp.diagonal(cv, axis1=1, axis2=2)[:, r])) for cv in mixed.cov]
+    assert d1[0] == pytest.approx(d0[0], rel=1e-12)  # identity: 1e-3 either way
+    assert d1[1] - d0[1] == pytest.approx(4e-6 - 1e-3, abs=1e-12)  # log: its own variance
+    # a per-draw (S, m) array is accepted and gives the same answer as the broadcast scalar
+    n = int(s_log.params.sigma_mu.shape[0])
+    f_draw = lambda cd: np.full((n, 1), 4e-6)  # noqa: E731
+    again = acq._build_pool([s_id._replace(noise_var=f_id), s_log._replace(noise_var=f_draw)], data, XS, [c])
+    np.testing.assert_allclose(again.cov[1], mixed.cov[1])
+
+
+def test_infinite_or_nan_gains_do_not_warn_and_do_not_win(monkeypatch):
+    """Two candidates with an infinite gain (H_now infinite) used to give inf - inf in the stopping rule."""
+    structs, data = world(plist=[make_params(24), make_params(24, p=1.2)])
+    cands = [cand(0.2, 0.5), cand(0.5, 0.5), cand(0.8, 0.5)]
+    real = acq._gain_samples
+
+    def fake(key, pool, block, eps, n, mode, ess_min):
+        g, f = real(key, pool, block, eps, n, mode, ess_min)
+        if block < 2:
+            g = jnp.full_like(g, jnp.inf)
+        return g, f
+
+    monkeypatch.setattr(acq, "_gain_samples", fake)
+    chosen, table = acq.select_batch(jax.random.key(0), structs, data, cands, XS, 0.01, 1, 1e9, max_draws=8)
+    assert not np.any(np.isnan(table.ratio[table.admissible]))

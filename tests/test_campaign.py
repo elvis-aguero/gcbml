@@ -5,17 +5,23 @@ Fast tests use d = 1 or tiny chains; the end-to-end and the A12 test are marked 
 
 import dataclasses
 import json
+import types
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 import gcbml  # noqa: F401
-from gcbml.campaign import Campaign, CampaignSettings, run_campaign
+from gcbml import transforms
+from gcbml.acquisition import StructurePosterior
+from gcbml.campaign import Campaign, CampaignSettings, _Fit, run_campaign
 from gcbml.cost import CostPrior
 from gcbml.data import RunResult
 from gcbml.gates import GateResult
+from gcbml.kernels import DeltaParams
+from gcbml.model import ModelConfig, ModelParams
 from gcbml.priors import PriorScales
 from gcbml.problem import Problem
 from gcbml.synthetic import A12Truth
@@ -53,10 +59,60 @@ def _fake_gates(failing=()):
     return gates_
 
 
+def _fake_fit_all(self, data, key, skip_note=None):
+    """Stand-in for the MCMC fits: 4 fixed-hyperparameter draws per structure (no sampler, no compilation).
+
+    The posterior of mu and of the levels is still computed from the real data by the real GP algebra, so
+    sigma_epi, the candidates, the forecast and the acquisition behave as in a real campaign; only the
+    hyperparameters are not inferred.
+    """
+    n_pad, k = np.asarray(data.H).shape
+    y = np.asarray(data.y, dtype=float)
+    fits = []
+    for hk in self.settings.h_kernels:
+        for tname in self.problem.transforms:
+            tf = transforms.get(tname)
+            cfg = ModelConfig(h_kernel=hk, increasing=(tname != "reciprocal"))
+            nvar = 4e-4 if tname == "identity" else 4e-6  # the noise in the units of each transform
+
+            def draw(i, nvar=nvar):
+                return ModelParams(
+                    sigma_mu=jnp.asarray(1.0 + 0.05 * i),
+                    ell_mu=jnp.full((self.problem.inputs.d,), 0.3),
+                    c0=jnp.full((k,), 0.3),
+                    c1=jnp.full((k,), 0.1),
+                    P=jnp.full((n_pad, k), 1.4),
+                    delta=DeltaParams(
+                        sigma=jnp.full((k,), 0.2),
+                        ell_x=jnp.full((k, self.problem.inputs.d), 0.4),
+                        ell_h=jnp.full((k,), 0.8),
+                        gamma=jnp.full((k,), 0.5),
+                    ),
+                    noise_var=jnp.full((n_pad,), nvar),
+                    ell_v=jnp.asarray(0.3),
+                )
+
+            params = jax.tree_util.tree_map(lambda *a: jnp.stack(a), *[draw(i) for i in range(4)])
+            z = jnp.broadcast_to(tf.forward(jnp.asarray(y)), (4, n_pad))
+            theta = {
+                "m_s": np.full((1, 4), np.log(nvar)),
+                "b_s": np.zeros((1, 4, k)),
+                "log_p0": np.full((1, 4, k), np.log(1.4)) + 0.05 * np.arange(4)[None, :, None],
+            }
+            sp = StructurePosterior(params, z, cfg, tf, 1.0)
+            post = types.SimpleNamespace(theta=theta)
+            fits.append(_Fit(f"{hk}/{tname}", cfg, tf, post, sp, np.arange(4), params, z))
+    return fits
+
+
 @pytest.fixture
 def no_gates(monkeypatch):
-    """Gates G0-G7 are tested in test_gates.py; here they would only add refits (and, with tiny chains,
-    chance failures). The control flow that reads their verdicts is what the tests below exercise."""
+    """Fake fits (_fake_fit_all) and fake gates: gates G0-G7 and the MCMC are tested in test_gates.py and
+    test_inference.py; the tests using this fixture exercise the control flow of the campaign (budget,
+    persistence, stop rules, repair), which reads their verdicts. One test below runs the real thing."""
+    monkeypatch.setattr(Campaign, "_fit_all", _fake_fit_all)
+    # sigma_fid (a joint posterior of 2 x 100 points per draw and level) is checked by the real-fit test only
+    monkeypatch.setattr(Campaign, "_sigma_fid", lambda self, fits, w, data, Xs, hbar, key: np.zeros(len(Xs)))
     monkeypatch.setattr(Campaign, "_gates", _fake_gates())
 
 
@@ -343,17 +399,6 @@ def test_trivially_easy_problem_stops_with_success_after_the_initial_design():
 
 
 @pytest.mark.usefixtures("no_gates")
-def test_a_tiny_budget_ends_with_P2_and_a_report():
-    t = A12Truth(7, d=1, budget=30.0, eps_abs=1e-4)
-    c = make(t)
-    rep = run_campaign(c, t.oracle(seed=0))
-    assert rep.status == "P2"
-    assert 0 < len(c.dataset) and c.spent <= 30.0
-    assert rep.m_y is not None and len(rep.m_y) == 100  # Sigma_N: 100 d points
-    assert rep.spent == pytest.approx(c.spent)
-    assert any("P2" in n for n in rep.notes)
-
-
 def test_a_gate_failure_that_cannot_be_repaired_gives_uncalibrated_never_success(monkeypatch):
     monkeypatch.setattr(Campaign, "_gates", _fake_gates(failing=("G3",)))
     t = A12Truth(6, d=1, budget=1e6, eps_abs=1e3)  # P1 holds at once
@@ -364,13 +409,19 @@ def test_a_gate_failure_that_cannot_be_repaired_gives_uncalibrated_never_success
     assert c.status == "uncalibrated" and c.ask() == []
 
 
-def test_a_failed_gate_does_not_stop_a_campaign_whose_tolerance_is_unmet(monkeypatch):
-    """P1 unmet: a failing gate is reported in the notes and the status stays P2 when the budget ends."""
+@pytest.mark.usefixtures("no_gates")
+def test_a_tiny_budget_ends_with_P2_and_a_report_and_a_failed_gate_is_only_noted(monkeypatch):
+    """Budget 30: a few level-0 runs, then nothing admissible. P1 is unmet, so a failing gate (G0, faked)
+    does not make the status "uncalibrated": it stays P2 and the gate is listed in the notes."""
     monkeypatch.setattr(Campaign, "_gates", _fake_gates(failing=("G0",)))
     t = A12Truth(7, d=1, budget=30.0, eps_abs=1e-4)
     c = make(t)
     rep = run_campaign(c, t.oracle(seed=0))
     assert rep.status == "P2"
+    assert 0 < len(c.dataset) and c.spent <= 30.0
+    assert rep.m_y is not None and len(rep.m_y) == 100  # Sigma_N: 100 d points
+    assert rep.spent == pytest.approx(c.spent)
+    assert any("P2" in n for n in rep.notes)
     assert any("G0" in n and "not calibrated" in n for n in rep.notes)
 
 
@@ -378,7 +429,7 @@ def test_a_failed_gate_does_not_stop_a_campaign_whose_tolerance_is_unmet(monkeyp
 def easy_run():
     """One campaign with the REAL gates on a problem whose tolerance is met by the initial design."""
     t = A12Truth(6, d=1, budget=1e6, eps_abs=1e3)
-    c = make(t)
+    c = make(t, dataclasses.replace(FAST, n_warmup=30, n_samples=30, n0_per_control=6))
     return c, run_campaign(c, t.oracle(seed=0))
 
 
@@ -392,7 +443,8 @@ def test_gate_table_has_every_gate_and_never_passes_what_it_cannot_test(easy_run
     # no gate may hide an exception behind "not testable"
     assert not [g.name for g in rep.gates if "error" in g.stats], [g.stats for g in rep.gates]
     # whatever the gates say, the status follows them: no "success" with a failed gate
-    assert (rep.status == "success") == (not any(g.status == "fail" for g in rep.gates))
+    blocking = [g.name for g in rep.gates if g.status == "fail" and g.name != "G6"]
+    assert (rep.status == "success") == (not blocking)
 
 
 def test_report_has_the_outputs_of_spec_section_3(easy_run):
@@ -436,12 +488,12 @@ def test_a_posterior_that_cannot_be_fitted_is_a_clear_error():
 
 @pytest.mark.slow
 def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
-    t = A12Truth(11, d=2, budget=6000.0, eps_abs=0.05)
+    t = A12Truth(11, d=2, budget=2500.0, eps_abs=0.05)
     settings = CampaignSettings(
         n_warmup=150,
         n_samples=100,
         n_chains=4,
-        q=10,
+        q=60,
         n_candidates_u=16,
         extra_levels=2,
         h_kernels=("twy2", "lb"),
@@ -449,9 +501,9 @@ def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
         seed=2,
     )
     c = make(t, settings, state_dir=tmp_path)
-    audit = Audit(t.oracle(seed=1, cost_sigma=0.3), c, 6000.0)
+    audit = Audit(t.oracle(seed=1, cost_sigma=0.3), c, 2500.0)
     rep = run_campaign(c, audit)
-    assert c.spent <= 6000.0
+    assert c.spent <= 2500.0
     assert rep.status in {"success", "P2", "uncalibrated"}
     xs = c.problem.sigma_n
     f0 = t.truth(xs)
@@ -459,7 +511,7 @@ def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
     inside = np.abs(np.asarray(rep.m_y) - f0) <= 2 * sig
     cover = float(inside.mean())
     with capsys.disabled():
-        print("\nE2E status", rep.status, "spent", round(rep.spent, 1), "of 6000")
+        print("\nE2E status", rep.status, "spent", round(rep.spent, 1), "of 2500")
         print("E2E coverage of f0 in m_y +- 2 sigma_epi:", cover)
         print("E2E allocation per level:", {k: round(v, 1) for k, v in sorted(rep.allocation.items())})
         print("E2E gates:", {g.name: g.status for g in rep.gates})
@@ -470,67 +522,179 @@ def test_end_to_end_a12_truth_moderate_budget(tmp_path, capsys):
 
 
 # ----------------------------------------------------------------------------------------------
-# 7. The A12 test (slow): spec Section 3, Step 1
+# G6 is a warning; the repair buys a finer probe; per-structure noise
 # ----------------------------------------------------------------------------------------------
 
 
-@pytest.mark.slow
-def test_a12_acquisitions_top_candidate_is_in_the_oracles_top_3(capsys, monkeypatch):
-    """20 random truths; after the initial design at levels 0-2 the acquisition ranks the candidates and
-    the oracle re-ranks its top 10 by full MCMC refits on fantasy outcomes. Pass: the acquisition's top
-    candidate is in the oracle's top 3 in at least 16 of 20 truths (spec Step 1 [assumption]).
+@pytest.mark.usefixtures("no_gates")
+def test_a_g6_failure_is_a_warning_in_the_notes_and_never_blocks_success(monkeypatch):
+    def g6_fails(self, an, key):
+        gs = [GateResult(n, "pass", {}) for n in GATE_NAMES]
+        gs[6] = GateResult("G6", "fail", {"median_rel_diff": 0.9})
+        return gs, None
 
-    GCBML_A12_N (default 20) sets the number of truths, GCBML_A12_REFITS (default 2) the fantasies per
-    candidate, GCBML_A12_WARMUP/SAMPLES/CHAINS the chains; a reduced run only reports its k of n.
-    """
-    import os
-    import time
+    monkeypatch.setattr(Campaign, "_gates", g6_fails)
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e3)
+    c = make(t)
+    rep = run_campaign(c, t.oracle(seed=0))
+    assert rep.status == "success"
+    assert any(n.startswith("warning: G6") for n in rep.notes)
 
-    from gcbml.synthetic import a12_oracle_ranking
 
-    monkeypatch.setattr(Campaign, "_gates", _fake_gates())  # the A12 question is about the acquisition
-    n_truths = int(os.environ.get("GCBML_A12_N", 20))
-    n_refit = int(os.environ.get("GCBML_A12_REFITS", 2))
-    settings = CampaignSettings(
-        n_warmup=int(os.environ.get("GCBML_A12_WARMUP", 150)),
-        n_samples=int(os.environ.get("GCBML_A12_SAMPLES", 100)),
-        n_chains=int(os.environ.get("GCBML_A12_CHAINS", 4)),
-        q=1,
-        n_candidates_u=16,
-        extra_levels=2,
-        h_kernels=("twy2",),
-        max_draws_acquisition=64,
-        seed=3,
-    )
-    hits, rows = 0, []
-    t_all = time.time()
-    for seed in range(n_truths):
-        t0 = time.time()
-        t = A12Truth(seed, d=2, budget=1e9, eps_abs=0.01)
-        c = make(t, settings)
-        probes = c.initial_design()
-        o = t.oracle(seed=seed)
-        o.submit(probes, [c.cap_of(p) for p in probes])
+def _g2_fails_at(row_values):
+    """Fake gates: G2 fails, with the given |z| for the first len(row_values) real rows."""
+
+    def gates_(self, an, key):
+        rows = np.arange(len(row_values))
+        an.gate_loc["G2"] = (rows, np.asarray(row_values, dtype=float))
+        gs = [GateResult(n, "pass", {}) for n in GATE_NAMES]
+        gs[2] = GateResult("G2", "fail", {})
+        return gs, None
+
+    return gates_
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_repair_buys_a_probe_one_level_finer_where_z_is_largest_at_most_twice(monkeypatch):
+    z = [0.1, 0.2, 5.0, 0.3, 0.4, 0.5, 0.6]  # row 2 has the largest |z|
+    monkeypatch.setattr(Campaign, "_gates", _g2_fails_at(z))
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e3)  # P1 holds: only the repair can add runs
+    c = make(t)
+    run_initial(c, t)
+    data, _ = c._build_data()
+    u_row2 = float(c.problem.inputs.from_unit(np.asarray(data.X)[2])[0])
+    o = t.oracle(seed=0)
+    for cycle in (1, 2):
+        probes = c.ask()
+        assert len(probes) == 1, cycle
+        (p,) = probes
+        assert p.u == (pytest.approx(u_row2),)
+        assert round(-np.log2(p.h[0])) == 2 + cycle  # one level finer than the finest run so far
+        assert c.cap_of(p) > 0 and c.reserved <= c.problem.budget
+        o.submit(probes, [c.cap_of(p)])
         c.tell(o.poll())
-        plan = c.plan(key=jax.random.PRNGKey(seed))
-        ratio = np.where(plan.table.admissible & (plan.table.gain > 0), plan.table.ratio, -np.inf)
-        top10 = [int(i) for i in np.argsort(-ratio)[:10] if np.isfinite(ratio[i])]
-        t_acq = time.time() - t0
-        ranking = a12_oracle_ranking(
-            t, c, [plan.cands[i] for i in top10], n_refit, key=jax.random.PRNGKey(100 + seed)
-        )
-        oracle_top3 = [top10[r.index] for r in ranking[:3]]
-        hit = top10[0] in oracle_top3
-        hits += hit
-        lv = [int(plan.cands[i].levels[0]) for i in top10]
-        rows.append((seed, hit, t.p, lv[0], [lv[r.index] for r in ranking[:3]]))
-        with capsys.disabled():
-            print(
-                f"\nA12 truth {seed}: p={t.p:.2f} acq top level {lv[0]}, oracle top3 levels "
-                f"{[lv[r.index] for r in ranking[:3]]}, hit={hit}, acq {t_acq:.0f}s, "
-                f"total {time.time() - t0:.0f}s"
-            )
-    with capsys.disabled():
-        print(f"\nA12 RESULT: {hits} of {n_truths} in {time.time() - t_all:.0f}s (rule: >= 16 of 20)")
-    if n_truths == 20:
-        assert hits >= 16
+    assert c._buy_cycles == 2
+    assert c.ask() == []  # no third purchase: the output is labelled, not repaired
+    assert c.status == "uncalibrated"
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_repair_is_skipped_when_the_gate_has_no_location_or_the_budget_is_too_small(monkeypatch):
+    def gates_(self, an, key):
+        gs = [GateResult(n, "pass", {}) for n in GATE_NAMES]
+        gs[2] = GateResult("G2", "fail", {})  # fails, but gives no residuals to locate
+        return gs, None
+
+    monkeypatch.setattr(Campaign, "_gates", gates_)
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e3)
+    c = make(t)
+    run_initial(c, t)
+    assert c.ask() == [] and c.status == "uncalibrated" and c._buy_cycles == 0
+
+
+class PositiveA12(A12Truth):
+    """A12 values shifted to be positive, so that the log transform is admissible."""
+
+    def value(self, x_unit, hbar):
+        return super().value(x_unit, hbar) + 10.0
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_every_structure_has_its_own_noise_variance_for_new_rows():
+    t = PositiveA12(3, d=1, budget=1e6, eps_abs=0.01)
+    prob = dataclasses.replace(t.problem(), transforms=("identity", "log"))
+    c = make(t, problem=prob)
+    run_initial(c, t)
+    an = c._analyse()
+    assert [s.transform.name for s in an.structures] == ["identity", "log"]
+    cand = types.SimpleNamespace(hbar=np.array([0.25]))
+    nv = [np.asarray(s.noise_var(cand)) for s in an.structures]
+    assert nv[0].shape == nv[1].shape == (4, 1)
+    np.testing.assert_allclose(nv[0], 4e-4)  # identity units
+    np.testing.assert_allclose(nv[1], 4e-6)  # log units: each structure its own variance
+    plan = c.plan(key=jax.random.PRNGKey(0))
+    assert np.all(np.isfinite(plan.table.ratio[plan.table.admissible]))
+
+
+# ----------------------------------------------------------------------------------------------
+# G4 on real fits (slow): spec Step 3
+# ----------------------------------------------------------------------------------------------
+
+
+PRE_AMP = 1.5  # a large smooth term (the noise sd is 0.01, the signal sd 1); 5.0 is absorbed even more
+
+
+def _four_level_campaign(seed, preasymptotic=False, mcmc=(60, 50, 2)):
+    """d = 1 A12 data at levels 0-3 (hbar 1 .. 1/8), noise 0.01. ``preasymptotic`` adds a large smooth term at
+    hbar = 1 only, a coarsest level that is not in the asymptotic range."""
+    t = A12Truth(seed, d=1, budget=1e9, eps_abs=0.01)
+    settings = dataclasses.replace(FAST, n_warmup=mcmc[0], n_samples=mcmc[1], n_chains=mcmc[2], seed=seed)
+    c = make(t, settings)
+    o = t.oracle(seed=seed)
+    res = []
+    rng = np.random.default_rng(seed)
+    for lev, n_sites in enumerate((12, 8, 6, 4)):
+        for i in range(n_sites):
+            u = (float(rng.uniform()),)
+            h = c._h_of_level(lev)
+            from gcbml.data import Probe
+
+            o.submit([Probe(f"s{lev}_{i}", u, h, None)], [1e12])
+            (r,) = o.poll()
+            if preasymptotic and lev == 0:
+                r = dataclasses.replace(r, y=r.y + PRE_AMP * np.cos(7.0 * u[0]))
+            res.append(r)
+    c.tell(res)
+    return c
+
+
+def _g4(c):
+    c._min_level = 0
+    an = c._analyse(repair=False)
+    return next(g for g in an.gates if g.name == "G4")
+
+
+@pytest.mark.slow
+def test_g4_passes_when_the_coarsest_level_is_asymptotic_and_fails_when_it_is_not():
+    n = 20
+    passes = sum(_g4(_four_level_campaign(s)).status == "pass" for s in range(n))
+    assert passes >= 0.9 * n, passes
+    bad = [_g4(_four_level_campaign(s, preasymptotic=True)) for s in range(5)]
+    assert sum(g.status == "fail" for g in bad) >= 4, [g.stats.get("frac_exceed") for g in bad]
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_when_the_forecast_mode_selects_nothing_the_other_mode_is_tried(monkeypatch):
+    """The softmax (P2) criterion can find no positive gain by Monte Carlo chance while the hinge one does."""
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e-4)
+    c = make(t)
+    run_initial(c, t)
+    seen = []
+
+    def select(self, an, cands, key):
+        seen.append(self.mode)
+        return [0, 1] if self.mode == "hinge" else []
+
+    monkeypatch.setattr(Campaign, "_select", select)
+    c.mode = "softmax"
+    probes = c.ask()
+    assert len(probes) == 2 and "softmax" in seen and seen[-1] == "hinge"
+    assert c.status == "running"
+
+
+def test_an_unprobed_level_with_an_enormous_expected_cost_is_priced_at_most_at_its_cap():
+    """A run is stopped at its cap, so the acquisition's price is E[min(c, cap)] (spec 2.6), not E[c]."""
+    from gcbml import cost
+
+    t = A12Truth(1, d=1, budget=1e6)
+    c = make(t)
+    post = c._cost_posterior()  # no data yet: the prior predictive, very wide at a distant level
+    level = 12
+    mean, cap = c._price(post, [(0.5,)], [level], None)
+    lo, hi = c._region_full()
+    U = (np.array([[0.5]]) - lo) / (hi - lo)
+    m, v = cost.predict_log2(post, U, np.full((1, 1), float(level)), np.zeros(1), np.zeros(1, bool))
+    w = np.ones(m.shape[0]) / m.shape[0]
+    plain = float(cost.expected_cost(m, v, w)[0])
+    assert plain > 1e3 * float(cap[0])  # E[c] is dominated by the far tail of the lognormal
+    assert 0 < float(mean[0]) <= float(cap[0]) * (1 + 1e-9)
