@@ -129,7 +129,16 @@ def recovery():
     data, zp = pad(X, H, z)
     cfg = ModelConfig()
     post = inference.fit(
-        jax.random.key(1), data, zp, zp, cfg, SCALES, n_controls=1, n_warmup=300, n_samples=300
+        jax.random.key(1),
+        data,
+        zp,
+        zp,
+        cfg,
+        SCALES,
+        n_controls=1,
+        n_warmup=300,
+        n_samples=300,
+        max_extensions=0,  # shapes below are those of one segment
     )
     return data, cfg, post, mu_true, (X, H, z)
 
@@ -553,3 +562,81 @@ def test_warm_start_from_a_posterior_samples_the_same_posterior_and_is_determini
     se = np.sqrt(base.var() / 60 + warm.var() / 60)  # generous effective sample sizes
     assert abs(base.mean() - warm.mean()) < 4 * se, (base.mean(), warm.mean(), se)
     assert w1.n_evals < 0.8 * post.n_evals  # a warm start skips the starting rule
+
+
+# ----------------------------------------------------------------------------------------------
+# automatic extension of the chains
+# ----------------------------------------------------------------------------------------------
+
+
+def _tiny_fit(max_extensions, seed=5, n_samples=20):
+    rng = np.random.default_rng(seed)
+    X, H = design_1d(5, 4, 3, 2)
+    z, _ = simulate(rng, TRUTH, X, H, XS)
+    data, zp = pad(X, H, z)
+    return inference.fit(
+        jax.random.key(seed),
+        data,
+        zp,
+        zp,
+        ModelConfig(),
+        SCALES,
+        1,
+        20,
+        n_samples,
+        max_extensions=max_extensions,
+    )
+
+
+def test_short_chains_are_extended_twice_and_the_first_draws_are_unchanged():
+    base = _tiny_fit(0)
+    ext = _tiny_fit(2)
+    assert base.diagnostics.n_extensions == 0 and ext.diagnostics.n_extensions == 2  # 80 draws: ESS < 400
+    assert ext.z.shape[1] == 3 * base.z.shape[1] and ext.params.c0.shape[1] == 60
+    assert all(v.shape[1] == 60 for v in ext.theta.values())
+    # the first segment is the unextended fit
+    np.testing.assert_array_equal(ext.theta["log_sigma_mu"][:, :20], base.theta["log_sigma_mu"])
+    np.testing.assert_array_equal(np.asarray(ext.z[:, :20]), np.asarray(base.z))
+    # diagnostics describe all the draws and match a direct computation on them
+    flat = ext.theta["log_sigma_mu"].reshape(4, 60)
+    rh, bulk, _ = ext.diagnostics["log_sigma_mu"]
+    assert rh == pytest.approx(dg.rhat(flat)) and bulk == pytest.approx(dg.bulk_ess(flat))
+    # reproducible
+    again = _tiny_fit(2)
+    np.testing.assert_array_equal(again.theta["log_sigma_mu"], ext.theta["log_sigma_mu"])
+
+
+def test_extension_rule_uses_rhat_above_1_05_or_bulk_ess_below_400():
+    ok = {"a": (1.04, 500.0, 500.0), "b": (1.0, 400.0, 100.0)}
+    assert not inference._needs_extension(ok)
+    assert inference._needs_extension({**ok, "c": (1.06, 900.0, 900.0)})
+    assert inference._needs_extension({**ok, "c": (1.0, 399.0, 900.0)})
+    assert inference._needs_extension({**ok, "c": (float("nan"), 900.0, 900.0)})
+
+
+@pytest.mark.slow
+def test_extension_improves_a_prior_draw_dataset_that_did_not_converge():
+    import sys
+
+    sys.path[:0] = ["scripts"]
+    try:
+        import quad_vs_mcmc as qv  # prior draw, 4 levels, id 406 (benchmarks/coverage: rhat 1.078 at 500/500)
+    finally:
+        sys.path.remove("scripts")
+    data, zp, *_ = qv.make_dataset(406, "prior", 4)
+    key = jax.random.key(406)
+    args = (data, zp, zp, qv.CFG, qv.SCALES, 2, 500, 500, 4)
+    base = inference.fit(key, *args, max_extensions=0)
+    ext = inference.fit(key, *args)
+    worst = lambda p: (  # noqa: E731
+        max(v[0] for v in p.diagnostics.values()),
+        min(v[1] for v in p.diagnostics.values()),
+    )
+    (rh0, ess0), (rh1, ess1) = worst(base), worst(ext)
+    print(
+        f"rhat {rh0:.3f} -> {rh1:.3f}, min bulk ESS {ess0:.0f} -> {ess1:.0f}, "
+        f"extensions {ext.diagnostics.n_extensions}"
+    )
+    assert rh0 > 1.05 and base.diagnostics.n_extensions == 0
+    assert 1 <= ext.diagnostics.n_extensions <= 2
+    assert rh1 < rh0 and rh1 < 1.05 and ess1 > 3 * ess0

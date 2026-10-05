@@ -3,46 +3,48 @@
 For run r with unit controls u_r (n_controls,), integer level vector l_r (k,) (0 = coarsest) and an
 optional oracle quote q_r (core-hours; None -> no quote):
 
-    log2 c_r = kappa0 + sum_j (gamma_j l_rj + q_j l_rj^2 + t_j l_rj^3)
-               + a * has_q_r * (log2 q_r - qbar) + omega(u_r, l_r) + eta_r
+    log2 c_r = kappa0 + sum_j g_j(l_rj) + a * has_q_r * (log2 q_r - qbar) + omega(u_r, l_r) + eta_r
+    g_j(l) = sum_{m<l} Delta_{j,m},  Delta_{j,0} ~ N(gamma_j, s_gamma_j^2),  Delta_{j,m+1} = Delta_{j,m} +
+    eps_jm,
+    eps_jm ~ N(0, s_delta_j^2)
     omega ~ GP(0, sigma_w^2 ard_matern52 over (u, l / l_scale)),   eta_r ~ N(0, s_eta^2)
 
-qbar is the mean of log2 q over runs with a quote (centring). The power law 2^{gamma l} is only the
-prior mean: omega lets the posterior depart from it (spec 2.6; the user requires an expressive posterior).
+Delta_{j,m} is the log2 cost step of refining component j from level m to m + 1; it follows a random walk over
+the levels, so the step may grow or shrink (spec 2.6). The walk is a Gaussian process in the level with
+    E g_j(l) = gamma_j l,
+    Cov(g_j(l), g_j(l')) = s_gamma_j^2 l l' + s_delta_j^2 [ (m-1) m (2m-1)/6 + |l - l'| (m-1) m / 2 ],  m =
+    min(l, l'),
+(from g(l) = l Delta_0 + sum_{i<l-1} (l-1-i) eps_i and sum_{a=1}^{m-1} a (a + d) with d = |l - l'|), defined
+for any
+level, probed or not. kappa0 and a are Gaussian too, so kappa0, Delta, a and omega are all integrated out
+exactly.
 A run stopped at its cap has a right-censored cost: log2 c_r >= log2 cap_r (Tobit; handled by data
 augmentation, like model.censored_sweep).
 
-Priors (problem-specific scales are required inputs, CostPrior): kappa0 ~ N(k0_mean, k0_sd^2);
-gamma_j ~ N(gamma_mean_j, gamma_sd_j^2); a ~ N(1, 0.5^2) (a quote is informative but not trusted);
-(sigma_w, ell_w) PC prior with sigma0 = 1 (log2 units), ell0 = 0.1; s_eta: PC/exponential with
-P(s_eta > 1) = 0.05.
+Priors (problem-specific scales are required inputs, CostPrior): kappa0 ~ N(k0_mean, k0_sd^2); the walk as
+above
+(gamma_mean, gamma_sd = s_gamma, s_delta); a ~ N(1, 0.5^2) (a quote is informative but not trusted);
+(sigma_w, ell_w) PC prior with sigma0 = 1 (log2 units), ell0 = 0.1; s_eta: exponential with P(s_eta > 1) =
+0.05.
 
-Inference: given (sigma_w, ell_w, s_eta) and the imputed censored values, log2 c is Gaussian with the
-linear coefficients (kappa0, gamma, a) Gaussian: integrate them and omega out exactly (same algebra as
-model.py with a Gaussian beta). Slice-sample the 2 + d_u + k hyperparameters (mcmc.slice), and Gibbs the
-censored values (truncated normal full conditionals). Use gcbml.linalg for every solve.
-
-Implementation notes (W3-B).
-The linear coefficients beta = (kappa0, gamma, a) have a Gaussian prior
-N(b0, B), B = diag(sd^2); with A = [1, L, L^2, has_q (log2q - qbar)] the data are Gaussian with covariance
-K_t = sigma_w^2 ard_matern52((u, l / l_scale)) + s_eta^2 I + A B A^T and mean A b0. The omega kernel has one
-length scale per input (d_u + k of them), so theta = (log sigma_w, log s_eta, log ell_1..ell_{d_u+k}) has
-2 + d_u + k entries. The prior of s_eta is the exponential with rate -log 0.05 (P(s_eta > 1) = 0.05); the
-(sigma_w, ell_w) prior is priors.pc_matern_logpdf with sigma0 = 1, ell0 = 0.1 (the PC prior is applied per
-ARD length scale, which spec 2.5 calls a heuristic). Censored rows hold log2 cap in ``log2c``.
-Predictions use the imputed log2c of each posterior draw, with beta and omega integrated out exactly.
-Curvature: log2 c also gains sum_j q_j l_j^2 with q_j ~ N(0, q_sd^2) (CostPrior.q_sd, default 0.5 log2
-units per level^2 [assumption]), integrated out like the other coefficients, so that the extrapolation
-variance grows with the distance from the probed levels (the log2 step of a real ladder grows with level).
-A cubic term sum_j t_j l_j^3, t_j ~ N(0, t_sd^2) (CostPrior.t_sd, default 0.1 [assumption]) is integrated out
-the same way: with only l and l^2 the 0.95 cap covered 84% of realised costs at the first unprobed level of an
-accelerating ladder (structural bias of the quadratic extrapolation); with the cubic term, 96%.
-``coef_posterior`` (an addition to the stub) gives beta | y, hyper per draw.
+Inference: given (sigma_w, ell_w, s_eta) and the imputed censored values, log2 c is Gaussian with mean
+A b0 + sum_j gamma_j l_j and covariance K_t = sigma_w^2 ard_matern52((u, l / l_scale)) + s_eta^2 I + A B A^T +
+K_walk,
+A = [1, has_q (log2q - qbar)], b0 = (k0_mean, 1), B = diag(k0_sd^2, 0.5^2); K_walk is the walk covariance
+above.
+The omega kernel has one length scale per input (d_u + k of them), so theta = (log sigma_w, log s_eta,
+log ell_1..ell_{d_u+k}) has 2 + d_u + k entries; the s_eta prior is the exponential with rate -log 0.05; the
+(sigma_w, ell_w) prior is priors.pc_matern_logpdf (applied per ARD length scale, a heuristic, spec 2.5).
+Slice-sample theta (mcmc.slice), Gibbs the censored values (truncated normal full conditionals); every solve
+goes
+through gcbml.linalg. Censored rows hold log2 cap in ``log2c``. Predictions use the imputed log2c of each
+posterior draw. ``coef_posterior`` (an addition to the stub) gives (kappa0, Delta steps, a) | y, hyper per
+draw.
 
 CostData: NamedTuple(U (n_pad, n_controls) unit, L (n_pad, k) float levels, log2c (n_pad,),
                      censored (n_pad,) bool, log2q (n_pad,) (0 where no quote), has_q (n_pad,) bool,
                      mask (n_pad,) bool)
-CostPrior: dataclass(k0_mean, k0_sd, gamma_mean (k,), gamma_sd (k,), l_scale=4.0)
+CostPrior: dataclass(k0_mean, k0_sd, gamma_mean (k,), gamma_sd (k,), s_delta (k,) [all required], l_scale=4.0)
 fit_cost(key, data, prior, n_warmup, n_samples, n_chains=4) -> CostPosterior (draws of hyperparameters and
     imputed log2c; diagnostics as in mcmc.diagnostics.summary)
 predict_log2(post, U_new, L_new, log2q_new, has_q_new) -> (mean (S, m), var (S, m))
@@ -62,7 +64,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
-from jax.scipy.special import ndtr, ndtri
+from jax.scipy.special import log_ndtr, ndtr, ndtri
 
 from gcbml import linalg
 from gcbml.kernels import ard_matern
@@ -96,10 +98,9 @@ class CostPrior:
     k0_mean: float
     k0_sd: float
     gamma_mean: tuple[float, ...]
-    gamma_sd: tuple[float, ...]
-    l_scale: float = 4.0
-    q_sd: float | tuple[float, ...] = 0.5
-    t_sd: float | tuple[float, ...] = 0.1
+    gamma_sd: tuple[float, ...]  # s_gamma
+    s_delta: float | tuple[float, ...]  # sd of the random-walk increment of the per-level step, log2 units
+    l_scale: float = 4.0  # scale of the levels as GP inputs (a numerical scale, not a prior)
 
 
 class CostPosterior(NamedTuple):
@@ -132,21 +133,44 @@ def _qbar(data: CostData):
     return jnp.where(n > 0, jnp.sum(data.log2q) / jnp.maximum(n, 1), 0.0)
 
 
-def _design(L, log2q, has_q, qbar):
-    """A = [1, L, L^2, L^3, has_q (log2q - qbar)], (n, 2 + 3k)."""
+def _design(log2q, has_q, qbar):
+    """A = [1, has_q (log2q - qbar)], (n, 2)."""
     hq = jnp.asarray(has_q, dtype=float)
     q = hq * (jnp.asarray(log2q, dtype=float) - qbar)
-    L = jnp.asarray(L, dtype=float)
-    return jnp.concatenate([jnp.ones((L.shape[0], 1)), L, L**2, L**3, q[:, None]], axis=1)
+    return jnp.stack([jnp.ones_like(q), q], axis=1)
 
 
 def _beta_prior(prior: CostPrior):
+    """Prior mean and sd of (kappa0, a)."""
+    return jnp.asarray([prior.k0_mean, A_PRIOR_MEAN], dtype=float), jnp.asarray(
+        [prior.k0_sd, A_PRIOR_SD], dtype=float
+    )
+
+
+def _walk_scales(prior: CostPrior):
     k = len(prior.gamma_mean)
-    qsd = np.broadcast_to(np.asarray(prior.q_sd, dtype=float), (k,))
-    tsd = np.broadcast_to(np.asarray(prior.t_sd, dtype=float), (k,))
-    b0 = jnp.asarray([prior.k0_mean, *prior.gamma_mean, *([0.0] * (2 * k)), A_PRIOR_MEAN], dtype=float)
-    bsd = jnp.asarray([prior.k0_sd, *prior.gamma_sd, *qsd, *tsd, A_PRIOR_SD], dtype=float)
-    return b0, bsd
+    sg = jnp.asarray(prior.gamma_sd, dtype=float)
+    sd = jnp.broadcast_to(jnp.asarray(prior.s_delta, dtype=float), (k,))
+    return jnp.asarray(prior.gamma_mean, dtype=float), sg, sd
+
+
+def _walk_mean(L, prior: CostPrior):
+    """E sum_j g_j(l_j) = sum_j gamma_j l_j, (n,)."""
+    gamma, _, _ = _walk_scales(prior)
+    return jnp.asarray(L, dtype=float) @ gamma
+
+
+def _walk_cov(La, Lb, prior: CostPrior):
+    """Cov(sum_j g_j(La_j), sum_j g_j(Lb_j)) with broadcasting of La (..., k) against Lb (..., k).
+
+    Per component, with m = min(l, l'), d = |l - l'|:
+    s_gamma^2 l l' + s_delta^2 [(m-1) m (2m-1)/6 + d (m-1) m / 2].
+    """
+    _, sg, sd = _walk_scales(prior)
+    La, Lb = jnp.asarray(La, dtype=float), jnp.asarray(Lb, dtype=float)
+    m, d = jnp.minimum(La, Lb), jnp.abs(La - Lb)
+    walk = (m - 1.0) * m * (2.0 * m - 1.0) / 6.0 + d * (m - 1.0) * m / 2.0
+    return jnp.sum(sg**2 * La * Lb + sd**2 * walk, axis=-1)
 
 
 def _inputs(U, L, prior: CostPrior):
@@ -160,14 +184,18 @@ class _Ctx(NamedTuple):
     b0: Any
     bsd: Any
     qbar: Any
+    m0: Any  # prior mean of log2 c at the real runs: A b0 + sum_j gamma_j l_j
+    Kw: Any  # walk covariance between the real runs
 
 
 def _context(data: CostData, prior: CostPrior) -> _Ctx:
     d = _clean(data)
     qbar = _qbar(d)
-    A = jnp.where(d.mask[:, None], _design(d.L, d.log2q, d.has_q, qbar), 0.0)
+    A = jnp.where(d.mask[:, None], _design(d.log2q, d.has_q, qbar), 0.0)
     b0, bsd = _beta_prior(prior)
-    return _Ctx(d, _inputs(d.U, d.L, prior), A, b0, bsd, qbar)
+    m0 = jnp.where(d.mask, A @ b0 + _walk_mean(d.L, prior), 0.0)
+    Kw = _walk_cov(d.L[:, None, :], d.L[None, :, :], prior)
+    return _Ctx(d, _inputs(d.U, d.L, prior), A, b0, bsd, qbar, m0, Kw)
 
 
 def _unpack(theta):
@@ -175,9 +203,9 @@ def _unpack(theta):
 
 
 def _total_cov(ctx: _Ctx, sigma_w, s_eta, ell):
-    """K_t = sigma_w^2 ard + s_eta^2 I + A B A^T on the real block (beta integrated)."""
+    """K_t = sigma_w^2 ard + s_eta^2 I + A B A^T + K_walk on the real block (beta, Delta integrated)."""
     mask = ctx.data.mask
-    K = sigma_w**2 * ard_matern(ctx.X, ctx.X, ell, NU) + (ctx.A * ctx.bsd**2) @ ctx.A.T
+    K = sigma_w**2 * ard_matern(ctx.X, ctx.X, ell, NU) + (ctx.A * ctx.bsd**2) @ ctx.A.T + ctx.Kw
     K = K + s_eta**2 * jnp.eye(K.shape[0])
     return jnp.where(mask[:, None] & mask[None, :], K, 0.0)
 
@@ -192,7 +220,7 @@ def _log_prior(theta):
 def _log_post(theta, y, ctx: _Ctx):
     sigma_w, s_eta, ell = _unpack(theta)
     F = linalg.factor(_total_cov(ctx, sigma_w, s_eta, ell), ctx.data.mask)
-    r = jnp.where(ctx.data.mask, y - ctx.A @ ctx.b0, 0.0)
+    r = jnp.where(ctx.data.mask, y - ctx.m0, 0.0)
     val = linalg.gaussian_logpdf(F, r, ctx.data.mask) + _log_prior(theta)
     return jnp.where(jnp.isfinite(val), val, -jnp.inf)
 
@@ -208,7 +236,7 @@ def _censored_sweep(key, theta, y, ctx: _Ctx):
     n = y.shape[0]
     F = linalg.factor(_total_cov(ctx, sigma_w, s_eta, ell), mask)
     bounds = ctx.data.log2c
-    r = jnp.where(mask, y - ctx.A @ ctx.b0, 0.0)
+    r = jnp.where(mask, y - ctx.m0, 0.0)
     Qr = linalg.solve(F, r)
     do = ctx.data.censored & mask
 
@@ -278,22 +306,42 @@ def fit_cost(
     return CostPosterior(hyper, log2c, diagnostics, ctx.data, prior)
 
 
-def coef_posterior(post: CostPosterior):
-    """Posterior of beta = (kappa0, gamma, q, t, a) given y and the hyperparameters, per draw.
+def coef_posterior(post: CostPosterior, max_level: int = 0):
+    """Posterior of (kappa0, Delta, a) given y and the hyperparameters, per draw.
 
-    Returns (mean (S, 2 + 3k), cov (S, 2 + 3k, 2 + 3k)) in the order (kappa0, gamma, q, t, a);
-    Gaussian, with omega and eta integrated out:
-    mean = b0 + B A^T K_t^{-1} (y - A b0), cov = B - B A^T K_t^{-1} A B.
+    Delta holds the log2 steps Delta_{j,m}, m = 0..M-1, for every component j, with M = max(max_level, highest
+    probed level), so a level above the probed ones can be asked for (its steps are then the walk's
+    extrapolation). Returns (mean (S, 2 + k M), cov (S, 2 + k M, 2 + k M)) in the order
+    (kappa0, Delta_{0,0..M-1}, Delta_{1,0..M-1}, ..., a); Gaussian, with omega and eta integrated out:
+    mean = b0 + B A^T K_t^{-1} (y - m0), cov = B - B A^T K_t^{-1} A B,
+    A = [1, Phi, quote], Phi_{r,(j,m)} = 1[m < l_rj].
     """
     ctx = _context(post.data, post.prior)
-    BAt = ctx.bsd[:, None] ** 2 * ctx.A.T  # (q, n)
+    k = ctx.data.L.shape[1]
+    real = np.asarray(ctx.data.mask)
+    M = int(max(max_level, np.max(np.asarray(ctx.data.L)[real]) if real.any() else 0))
+    gamma, sg, sd = _walk_scales(post.prior)
+    m_idx = jnp.arange(M, dtype=float)
+    # Phi: (n, k, M)
+    Phi = (m_idx[None, None, :] < ctx.data.L[:, :, None]).astype(float)
+    Phi = jnp.where(ctx.data.mask[:, None, None], Phi, 0.0).reshape(Phi.shape[0], k * M)
+    Af = jnp.concatenate([ctx.A[:, :1], Phi, ctx.A[:, 1:]], axis=1)  # (n, 2 + k M)
+    b0 = jnp.concatenate([ctx.b0[:1], jnp.repeat(gamma, M), ctx.b0[1:]])
+    walk = sg[:, None, None] ** 2 + sd[:, None, None] ** 2 * jnp.minimum(
+        m_idx[None, :, None], m_idx[None, None, :]
+    )
+    B = jnp.zeros((2 + k * M, 2 + k * M))
+    B = B.at[0, 0].set(ctx.bsd[0] ** 2).at[-1, -1].set(ctx.bsd[1] ** 2)
+    for j in range(k):
+        B = B.at[1 + j * M : 1 + (j + 1) * M, 1 + j * M : 1 + (j + 1) * M].set(walk[j])
+    BAt = B @ Af.T  # (q, n)
 
     def one(sigma_w, s_eta, ell, y):
         F = linalg.factor(_total_cov(ctx, sigma_w, s_eta, ell), ctx.data.mask)
-        r = jnp.where(ctx.data.mask, y - ctx.A @ ctx.b0, 0.0)
+        r = jnp.where(ctx.data.mask, y - ctx.m0, 0.0)
         V = jax.scipy.linalg.solve_triangular(F.L, BAt.T, lower=True)  # (n, q)
-        mean = ctx.b0 + BAt @ linalg.solve(F, r)
-        return mean, jnp.diag(ctx.bsd**2) - V.T @ V
+        mean = b0 + BAt @ linalg.solve(F, r)
+        return mean, B - V.T @ V
 
     h = post.hyper
     return jax.vmap(one)(h["sigma_w"], h["s_eta"], h["ell"], post.log2c)
@@ -305,20 +353,22 @@ def predict_log2(post: CostPosterior, U_new, L_new, log2q_new, has_q_new):
     L_new = jnp.asarray(L_new, dtype=float)
     has_q_new = jnp.asarray(has_q_new, dtype=bool)
     log2q_new = jnp.where(has_q_new, jnp.asarray(log2q_new, dtype=float), 0.0)
-    An = _design(L_new, log2q_new, has_q_new, ctx.qbar)
+    An = _design(log2q_new, has_q_new, ctx.qbar)
     Xn = _inputs(U_new, L_new, post.prior)
     mask = ctx.data.mask
     AB = ctx.A * ctx.bsd**2
-    vb = jnp.sum(An * ctx.bsd**2 * An, axis=1)
+    vb = jnp.sum(An * ctx.bsd**2 * An, axis=1) + _walk_cov(L_new, L_new, post.prior)
+    Cw = _walk_cov(ctx.data.L[:, None, :], L_new[None, :, :], post.prior)
+    mn0 = An @ ctx.b0 + _walk_mean(L_new, post.prior)
 
     def one(sigma_w, s_eta, ell, y):
         F = linalg.factor(_total_cov(ctx, sigma_w, s_eta, ell), mask)
-        C = sigma_w**2 * ard_matern(ctx.X, Xn, ell, NU) + AB @ An.T
+        C = sigma_w**2 * ard_matern(ctx.X, Xn, ell, NU) + AB @ An.T + Cw
         C = jnp.where(mask[:, None], C, 0.0)
         v = sigma_w**2 + s_eta**2 + vb
-        r = jnp.where(mask, y - ctx.A @ ctx.b0, 0.0)
+        r = jnp.where(mask, y - ctx.m0, 0.0)
         mean, var = linalg.conditional(F, C, v, r)
-        return mean + An @ ctx.b0, jnp.maximum(var, 0.0)
+        return mean + mn0, jnp.maximum(var, 0.0)
 
     h = post.hyper
     return jax.vmap(one)(h["sigma_w"], h["s_eta"], h["ell"], post.log2c)
@@ -351,8 +401,23 @@ def expected_capped_cost(mean, var, w, cap):
     m = LN2 * mean
     s = LN2 * jnp.sqrt(jnp.maximum(var, 1e-300))
     lk = jnp.log(cap)
-    part = jnp.exp(m + 0.5 * s**2) * ndtr((lk - m - s**2) / s) + cap * ndtr((m - lk) / s)
+    # E[X; X < k] = exp(log Phi(z1) + m + s^2/2): in log space, the product of an overflowing and an
+    # underflowing factor
+    part = jnp.exp(log_ndtr((lk - m - s**2) / s) + m + 0.5 * s**2) + cap * ndtr((m - lk) / s)
     return jnp.sum(w[:, None] * part, axis=0)
+
+
+def prob_finish(mean, var, w, cap):
+    """P(c <= cap) under the pooled mixture of log2 c ~ N(mean_s, var_s), weights w_s; ``cap`` in the units of
+    c.
+
+    The probability that a run stopped at ``cap`` finishes before it (spec 2.6): sum_s w_s Phi((log2 cap -
+    mean_s) / sd_s).
+    """
+    mean, var = jnp.asarray(mean, dtype=float), jnp.asarray(var, dtype=float)
+    w = _norm_w(w, mean.shape[0])
+    sd = jnp.sqrt(jnp.maximum(var, 1e-300))
+    return jnp.sum(w[:, None] * ndtr((jnp.log2(jnp.asarray(cap, dtype=float)) - mean) / sd), axis=0)
 
 
 def cost_cap(mean, var, w, q: float = 0.95):
