@@ -96,7 +96,8 @@ def run(args) -> dict:
                 cost_mean=float(cands[k].cost_mean), acq_gain=float(tab.gain[i]),
                 acq_ratio=float(tab.ratio[i]), oracle_gain=r.gain, oracle_value=r.value,
                 oracle_gain_se=r.se * float(cands[k].cost_mean), n_fantasies=r.n, rel_se=r.rel_se,
-                rhat_p0=r.rhat_p0,
+                rhat_p0=r.rhat_p0, raw_gains=list(r.raw_gains), raw_rhats=list(r.raw_rhats),
+                n_discarded=r.n_discarded,
             )
         )  # fmt: skip
     out = dict(
@@ -112,14 +113,14 @@ def main(argv=None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, required=True)
     ap.add_argument("--out", default="results/a12")
-    ap.add_argument("--warmup", type=int, default=300)
-    ap.add_argument("--samples", type=int, default=200)
+    ap.add_argument("--warmup", type=int, default=600)
+    ap.add_argument("--samples", type=int, default=400)
     ap.add_argument("--chains", type=int, default=4)
-    ap.add_argument("--eps", type=float, default=0.01)
+    ap.add_argument("--eps", type=float, default=0.05)
     ap.add_argument("--n-u", type=int, default=16)
     ap.add_argument("--max-draws", type=int, default=64)
     ap.add_argument("--n-base", type=int, default=3)
-    ap.add_argument("--n-min", type=int, default=6)
+    ap.add_argument("--n-min", type=int, default=12)
     ap.add_argument("--n-max", type=int, default=48)
     ap.add_argument("--se-target", type=float, default=0.1)
     args = ap.parse_args(argv)

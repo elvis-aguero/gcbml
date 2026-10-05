@@ -213,6 +213,9 @@ class OracleRank:
     n: int = 0  # fantasies (full refits) behind the value
     rel_se: float = float("nan")  # s.e. of the mean gain / mean gain
     rhat_p0: float = float("nan")  # worst rhat of log p0 over the refits
+    raw_gains: tuple = ()  # H_ref - H_after of every refit, divergent ones included
+    raw_rhats: tuple = ()  # rhat of log p0 of every refit
+    n_discarded: int = 0  # divergent refits left out of the mean (see campaign.oracle_values)
 
 
 def a12_oracle_ranking(

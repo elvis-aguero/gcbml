@@ -1460,13 +1460,16 @@ def fantasy_dataset(campaign: Campaign, cand: Candidate, y: float, tag: str) -> 
 def oracle_values(
     truth, campaign: Campaign, candidates, n_refit_draws: int, key=None, source: str = "model",
     se_target: float | None = None, n_max: int | None = None, H_base: float | None = None,
+    max_h_ratio: float = 10.0,
 ):  # fmt: skip
     """See synthetic.a12_oracle_ranking. Imported lazily by it so that campaign does not import synthetic.
 
     n_refit_draws fantasies per candidate; with ``se_target`` the number grows (doubling, up to ``n_max``)
     until the Monte Carlo s.e. of the mean gain is below se_target x the mean gain. ``H_base`` replaces H
     of the current posterior as the reference (e.g. the mean over refits of the unchanged data, which removes
-    the refit's own Monte Carlo bias from the gain).
+    the refit's own Monte Carlo bias from the gain). A refit whose H_after exceeds ``max_h_ratio`` x the
+    reference is a divergent fit (seen once, with H ~ 1e51, in 60 refits): it is counted in ``n_discarded``
+    and left out of the mean, and the raw gains are returned for any other treatment. [assumption]
     """
     from gcbml.synthetic import OracleRank
 
@@ -1475,26 +1478,28 @@ def oracle_values(
     H_now = float(acq.H_value(an.sigma_epi, an.eps, campaign.mode)) if H_base is None else float(H_base)
     out = []
     for i, cand in enumerate(candidates):
-        gains, rhats = [], []
+        gains, rhats, n_drawn = [], [], 0
         n_target = n_refit_draws
         while True:
-            while len(gains) < n_target:
-                kf = jax.random.fold_in(key, i * 100000 + len(gains))
+            while n_drawn < n_target:
+                kf = jax.random.fold_in(key, i * 100000 + n_drawn)
                 y = _fantasy_outcome(truth, campaign, an, cand, kf, source)
-                ds = fantasy_dataset(campaign, cand, y, f"{i}-{len(gains)}")
+                ds = fantasy_dataset(campaign, cand, y, f"{i}-{n_drawn}")
                 H_after, rh = refit_H(campaign, an, ds, jax.random.fold_in(kf, 9))
+                n_drawn += 1
                 gains.append(H_now - H_after)
                 rhats.append(rh)
-            g = np.asarray(gains)
+            raw = np.asarray(gains)
+            g = raw[np.isfinite(raw) & (raw > -(max_h_ratio - 1.0) * abs(H_now))]
             se = float(g.std(ddof=1) / np.sqrt(len(g))) if len(g) > 1 else float("inf")
-            rel = se / abs(g.mean()) if g.mean() != 0 else float("inf")
-            if se_target is None or rel < se_target or len(gains) >= (n_max or len(gains)):
+            rel = se / abs(g.mean()) if len(g) and g.mean() != 0 else float("inf")
+            if se_target is None or rel < se_target or n_drawn >= (n_max or n_drawn):
                 break
-            n_target = min(2 * len(gains), n_max) if n_max else 2 * len(gains)
+            n_target = min(2 * n_drawn, n_max) if n_max else 2 * n_drawn
         out.append(
             OracleRank(
-                i, float(g.mean() / cand.cost_mean), float(g.mean()), se / cand.cost_mean,
-                len(g), rel, max(rhats),
+                i, float(g.mean() / cand.cost_mean), float(g.mean()), se / cand.cost_mean, len(g), rel,
+                max(rhats), tuple(float(x) for x in raw), tuple(float(x) for x in rhats), n_drawn - len(g),
             )
         )  # fmt: skip
     return sorted(out, key=lambda t: -t.value)

@@ -28,9 +28,7 @@ def main(argv=None) -> int:
     files = sorted(Path(args.dir).glob("truth_*.json"), key=lambda p: int(p.stem.split("_")[1]))
     res = [json.loads(f.read_text()) for f in files]
     print(f"{len(res)} of {args.n} truths found")
-    hdr = (
-        "seed   p   choice_lvl oracle_best_lvl regret  | gain acq/oracle per level 0..4 (oracle rel s.e., n)"
-    )
+    hdr = "seed   p   choice_lvl oracle_best_lvl regret  | gain acq/oracle per level 0..4 (oracle rel s.e., fantasies used + divergent discarded)"
     print(hdr)
     hits, ratios = 0, {lev: [] for lev in range(5)}
     for r in res:
@@ -45,7 +43,9 @@ def main(argv=None) -> int:
         for x in c:
             g = x["acq_gain"] / x["oracle_gain"] if x["oracle_gain"] > 0 else float("nan")
             ratios[x["level"]].append(g)
-            cells.append(f"L{x['level']}:{g:6.2f} ({x['rel_se']:.2f},{x['n_fantasies']})")
+            cells.append(
+                f"L{x['level']}:{g:6.2f} ({x['rel_se']:.2f},{x['n_fantasies']}+{x.get('n_discarded', 0)}x)"
+            )
         print(
             f"{r['seed']:3d} {r['p']:5.2f}   {c[acq_i]['level']}          {c[orc_i]['level']}"
             f"            {regret:5.2f} {'ok ' if hit else 'MISS'} | " + "  ".join(cells)
@@ -74,4 +74,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys
