@@ -65,7 +65,11 @@ def main(argv=None) -> int:
             f"-> {'ok' if good else 'FAIL'}"
         )
     rh = [x["rhat_p0"] for r in res for x in r["candidates"] if np.isfinite(x["rhat_p0"])]
-    print(f"rhat(log p0): max over refits {max(rh):.3f}; base {max(r['rhat_p0_base'] for r in res):.3f}")
+    base = [r["rhat_p0_base"] for r in res if np.isfinite(r["rhat_p0_base"])]
+    nd = sum(x.get("n_discarded", 0) for r in res for x in r["candidates"])
+    nf = sum(x["n_fantasies"] + x.get("n_discarded", 0) for r in res for x in r["candidates"])
+    print(f"rhat(log p0): max over refits {max(rh):.3f}; base {max(base) if base else float('nan'):.3f}")
+    print(f"divergent refits discarded: {nd} of {nf} fantasies ({100 * nd / max(nf, 1):.2f}%)")
     se = [x["rel_se"] for r in res for x in r["candidates"]]
     print(
         f"oracle rel s.e.: median {np.median(se):.2f}, max {max(se):.2f}; fantasies per candidate: "
