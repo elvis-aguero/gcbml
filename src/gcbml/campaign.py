@@ -515,7 +515,7 @@ class Campaign:
         )
 
     def _price(self, post, us, levels, log2q):
-        """(expected cost, cap) of runs at controls ``us`` (physical) and diagonal levels."""
+        """(E[min(c, cap)], cap) of runs at controls ``us`` (physical) and diagonal levels."""
         lo, hi = self._region_full()
         U = (np.asarray(us, float).reshape(len(us), self._nc) - lo) / (hi - lo)
         L = np.repeat(np.asarray(levels, float)[:, None], self._k, axis=1)
@@ -530,10 +530,14 @@ class Campaign:
         idx = np.concatenate([np.arange(m), np.zeros(mp - m, dtype=int)])
         mean, var = cost.predict_log2(post, U[idx], L[idx], np.asarray(lq)[idx], np.asarray(hq)[idx])
         w = jnp.ones(mean.shape[0]) / mean.shape[0]
-        return (
-            np.asarray(cost.expected_cost(mean, var, w))[:m],
-            np.asarray(cost.cost_cap(mean, var, w, CAP_QUANTILE))[:m],
-        )
+        cap = cost.cost_cap(mean, var, w, CAP_QUANTILE)
+        # a run is stopped at its cap, so it is charged E[min(c, cap)], not E[c] (spec 2.6, Step 5)
+        capped = np.asarray(cost.expected_capped_cost(mean, var, w, cap))
+        cap = np.asarray(cap)
+        # exp(m + s^2/2) overflows to inf for an enormous predictive variance and inf * 0 is nan in
+        # cost.expected_capped_cost; the price can never exceed the cap, which is the fallback and the bound
+        capped = np.where(np.isfinite(capped), np.minimum(capped, cap), cap)
+        return capped[:m], cap[:m]
 
     # ------------------------------------------------------------------ data
 

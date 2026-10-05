@@ -680,3 +680,21 @@ def test_when_the_forecast_mode_selects_nothing_the_other_mode_is_tried(monkeypa
     probes = c.ask()
     assert len(probes) == 2 and "softmax" in seen and seen[-1] == "hinge"
     assert c.status == "running"
+
+
+def test_an_unprobed_level_with_an_enormous_expected_cost_is_priced_at_most_at_its_cap():
+    """A run is stopped at its cap, so the acquisition's price is E[min(c, cap)] (spec 2.6), not E[c]."""
+    from gcbml import cost
+
+    t = A12Truth(1, d=1, budget=1e6)
+    c = make(t)
+    post = c._cost_posterior()  # no data yet: the prior predictive, very wide at a distant level
+    level = 12
+    mean, cap = c._price(post, [(0.5,)], [level], None)
+    lo, hi = c._region_full()
+    U = (np.array([[0.5]]) - lo) / (hi - lo)
+    m, v = cost.predict_log2(post, U, np.full((1, 1), float(level)), np.zeros(1), np.zeros(1, bool))
+    w = np.ones(m.shape[0]) / m.shape[0]
+    plain = float(cost.expected_cost(m, v, w)[0])
+    assert plain > 1e3 * float(cap[0])  # E[c] is dominated by the far tail of the lognormal
+    assert 0 < float(mean[0]) <= float(cap[0]) * (1 + 1e-9)
