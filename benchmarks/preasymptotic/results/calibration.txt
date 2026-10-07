@@ -1,0 +1,16 @@
+== pre-asymptotic family ==
+pair      target  band          median  p10-p90        in band
+L6->L7     0.08  0.04-0.12    0.044  0.002-0.210   True
+L7->L8     0.17  0.12-0.22    0.205  0.065-0.348   True
+L8->L9     0.18  0.13-0.23    0.159  0.097-0.241   True
+L9->L10    0.06  0.02-0.10    0.063  0.032-0.119   True
+all four bands met: True
+
+== control family ==
+pair      target  band          median  p10-p90        in band
+L6->L7     0.08  0.04-0.12    0.787  0.602-0.902   False
+L7->L8     0.17  0.12-0.22    0.429  0.290-0.551   False
+L8->L9     0.18  0.13-0.23    0.175  0.104-0.280   True
+L9->L10    0.06  0.02-0.10    0.067  0.032-0.135   True
+all four bands met: False (control: only the L8->L9 row is calibrated)
+
