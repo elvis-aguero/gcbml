@@ -242,3 +242,82 @@ def a12_oracle_ranking(
     from gcbml.campaign import oracle_values  # local import: campaign does not import synthetic
 
     return oracle_values(truth, campaign_state, candidates, n_refit_draws, key, source, **kw)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Pre-asymptotic truths (benchmarks/preasymptotic): coarse levels are under-resolved, so flat in hbar.
+# ---------------------------------------------------------------------------------------------------------
+
+
+def preasymptotic_b(hbar, p: float, h_s: float, m: float):
+    """b(hbar) = hbar^p / (1 + (hbar/h_s)^m)^(p/m).
+
+    b(0) = 0. For hbar << h_s, b ~ hbar^p (asymptotic power law of order p).
+    For hbar >> h_s, b -> h_s^p (flat).
+    h_s = inf gives the pure power law hbar^p.
+    """
+    h = np.asarray(hbar, dtype=float)
+    if np.isinf(h_s):
+        return h**p
+    return h**p / (1.0 + (h / h_s) ** m) ** (p / m)
+
+
+@dataclass(frozen=True)
+class PreasymptoticTruth:
+    """z(x, hbar) = mu(x) - a(x) b(hbar), x in [0, 1]. z is the log of the quantity of interest.
+
+    mu(x) = mu0 + mu1 x^2, a(x) = a0 (1 + a1 x^2). The truth at hbar = 0 is z0(x) = mu(x).
+    """
+
+    mu0: float
+    mu1: float
+    a0: float
+    a1: float
+    p: float
+    h_s: float  # inf: no saturation (control)
+    m: float
+
+    def z0(self, x):
+        x = np.asarray(x, dtype=float)
+        return self.mu0 + self.mu1 * x**2
+
+    def a(self, x):
+        x = np.asarray(x, dtype=float)
+        return self.a0 * (1.0 + self.a1 * x**2)
+
+    def z(self, x, hbar):
+        return self.z0(x) - self.a(x) * preasymptotic_b(hbar, self.p, self.h_s, self.m)
+
+    def observe(self, x, hbar, noise_sd: float, seed: int = 0) -> np.ndarray:
+        """One noisy run per (level, x): array (len(hbar), len(x)) of z + N(0, noise_sd^2)."""
+        x = np.asarray(x, dtype=float)
+        hbar = np.atleast_1d(np.asarray(hbar, dtype=float))
+        clean = np.array([self.z(x, h) for h in hbar])
+        return clean + noise_sd * np.random.default_rng(seed).standard_normal(clean.shape)
+
+
+def preasymptotic_truth(
+    seed: int,
+    *,
+    mu0: float = 0.0,
+    mu1_range: tuple[float, float] = (0.5, 1.5),
+    a0_range: tuple[float, float] = (0.2, 0.6),
+    a1_range: tuple[float, float] = (0.0, 0.5),
+    p_range: tuple[float, float] = (1.0, 2.0),
+    h_s_range: tuple[float, float] | None = (0.2, 0.6),
+    m_range: tuple[float, float] = (2.0, 8.0),
+) -> PreasymptoticTruth:
+    """Draw one truth. mu1, a0, a1, p, m are uniform on their ranges; h_s is log-uniform.
+
+    h_s_range=None is the control family: h_s = inf, b = hbar^p.
+    """
+    rng = np.random.default_rng(seed)
+    mu1 = rng.uniform(*mu1_range)
+    a0 = rng.uniform(*a0_range)
+    a1 = rng.uniform(*a1_range)
+    p = rng.uniform(*p_range)
+    m = rng.uniform(*m_range)
+    h_s = math.inf
+    if h_s_range is not None:
+        h_s = math.exp(rng.uniform(math.log(h_s_range[0]), math.log(h_s_range[1])))
+    return PreasymptoticTruth(mu0=mu0, mu1=mu1, a0=a0, a1=a1, p=p, h_s=h_s, m=m)

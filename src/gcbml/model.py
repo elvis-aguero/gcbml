@@ -29,7 +29,7 @@ Implemented in W2-A. All functions below are pure jax (jit, and vmap over parame
 gcbml.linalg for every solve, and respect the padding mask: padded rows must not affect any result.
 
 mean_basis(X, kind) -> M (n, q)
-rho(params, H, P) -> (rho0 (n,), rho1 (n,))        with hbar^p := 0 where hbar = 0.
+rho(params, H, P, cfg=None) -> (rho0 (n,), rho1 (n,))  with b(hbar) := 0 where hbar = 0 (kernels.err_shape).
 covariance(params, data, cfg) -> K (n_pad, n_pad)   the covariance above, without the beta term.
 log_marginal(params, data, z, cfg) -> scalar       flat or Gaussian beta (cfg.beta_prior).
     z: (n_pad,) transformed outputs (censored rows hold their current imputed values).
@@ -57,10 +57,11 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.special import ndtr, ndtri
 
 from gcbml import linalg
-from gcbml.kernels import DeltaParams, ard_matern, delta_cov, matern
+from gcbml.kernels import DeltaParams, ard_matern, delta_cov, err_shape, matern
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,11 @@ class ModelConfig:
     v_index: tuple[int, ...] = ()  # columns of X that are output coordinates v (S1)
     increasing: bool = True  # Lambda increasing (identity, log) or decreasing (reciprocal)
     gamma_fixed: float | None = None  # "lb" only: pin gamma (0.5 = Brownian, Tuo-Wu-Yu); None = infer it
+    shape: str = (
+        "power"  # error shape b(hbar): "power", "saturating", "two_term" (kernels.err_shape); twy2 only
+    )
+    sat_m: float = 4.0  # sharpness m of the "saturating" shape (ASSUMPTION, not inferred)
+    sat_lo_factor: float = 0.5  # prior of log h_s: U[log(sat_lo_factor * h_min), log(8 h_max)] (ASSUMPTION)
 
 
 class ModelParams(NamedTuple):
@@ -89,12 +95,16 @@ class ModelParams(NamedTuple):
     delta: DeltaParams
     noise_var: jnp.ndarray  # (n_pad,) s^2(x_i, h_i), from gcbml.noise
     ell_v: jnp.ndarray  # () within-run correlation length over v (ignored unless cfg.within_run)
+    aux: jnp.ndarray = np.zeros(2)  # (2,) error-shape parameters (kernels.err_shape); unused for "power"
 
 
-def _hpow(h, p):
-    """h**p with exactly 0 (and a finite gradient) at h = 0."""
-    pos = h > 0
-    return jnp.where(pos, jnp.where(pos, h, 1.0) ** p, 0.0)
+def _shape_args(cfg: ModelConfig | None):
+    """(shape, sat_m) of a config; a shape other than "power" needs the twy2 kernel."""
+    if cfg is None:
+        return "power", 4.0
+    if cfg.shape != "power" and cfg.h_kernel != "twy2":
+        raise ValueError("error shapes other than 'power' need h_kernel='twy2'")
+    return cfg.shape, cfg.sat_m
 
 
 def mean_basis(X, kind: str):
@@ -108,10 +118,20 @@ def mean_basis(X, kind: str):
     raise ValueError(f"mean_basis must be 'constant' or 'linear', got {kind!r}")
 
 
-def rho(params: ModelParams, H, P):
-    """(rho0, rho1) of rows with scaled resolutions H (n, k) and orders P (n, k); hbar^p := 0 at hbar = 0."""
-    hp = _hpow(jnp.asarray(H, dtype=float), P)
+def rho(params: ModelParams, H, P, cfg: ModelConfig | None = None):
+    """(rho0, rho1) of rows with scaled resolutions H (n, k) and orders P (n, k); b(hbar) := 0 at hbar = 0.
+
+    b is the error shape of cfg (default: the power law hbar^p) with the parameters params.aux.
+    """
+    shape, sat_m = _shape_args(cfg)
+    hp = err_shape(jnp.asarray(H, dtype=float), P, shape, params.aux, sat_m)
     return hp @ params.c0, 1.0 + hp @ params.c1
+
+
+def _dshape(params: ModelParams, cfg: ModelConfig):
+    """(shape, aux, sat_m) positional tail of kernels.delta_cov."""
+    shape, sat_m = _shape_args(cfg)
+    return shape, params.aux, sat_m
 
 
 def _noise_cov(params: ModelParams, data, cfg: ModelConfig):
@@ -144,11 +164,13 @@ def _setup(params: ModelParams, data, cfg: ModelConfig) -> _Setup:
     mask = jnp.asarray(data.mask, dtype=bool)
     X = jnp.asarray(data.X, dtype=float)
     H = jnp.asarray(data.H, dtype=float)
-    rho0, rho1 = rho(params, H, params.P)
+    rho0, rho1 = rho(params, H, params.P, cfg)
     rho0, rho1 = jnp.where(mask, rho0, 0.0), jnp.where(mask, rho1, 0.0)
     A = jnp.where(mask[:, None], rho1[:, None] * mean_basis(X, cfg.mean_basis), 0.0)
     Kg = params.sigma_mu**2 * ard_matern(X, X, params.ell_mu, cfg.nu_x)
-    Kd = delta_cov(X, H, X, H, params.P, params.P, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    Kd = delta_cov(
+        X, H, X, H, params.P, params.P, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h, *_dshape(params, cfg)
+    )
     K = rho1[:, None] * Kg * rho1[None, :] + Kd + _noise_cov(params, data, cfg)
     K = jnp.where(mask[:, None] & mask[None, :], K, 0.0)
     return _Setup(mask, rho0, rho1, A, K)
@@ -252,12 +274,16 @@ def predict_level(params: ModelParams, data, z, cfg: ModelConfig, Xs, Hs, Ps, no
     X = jnp.asarray(data.X, dtype=float)
     H = jnp.asarray(data.H, dtype=float)
     Xs, Hs, Ps = (jnp.asarray(a, dtype=float) for a in (Xs, Hs, Ps))
-    rho0s, rho1s = rho(params, Hs, Ps)
+    rho0s, rho1s = rho(params, Hs, Ps, cfg)
     Ms = mean_basis(Xs, cfg.mean_basis)
     Kxs = params.sigma_mu**2 * ard_matern(X, Xs, params.ell_mu, cfg.nu_x)
-    Kds = delta_cov(X, H, Xs, Hs, params.P, Ps, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    Kds = delta_cov(
+        X, H, Xs, Hs, params.P, Ps, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h, *_dshape(params, cfg)
+    )
     C = jnp.where(S.mask[:, None], S.rho1[:, None] * Kxs * rho1s[None, :] + Kds, 0.0)
-    Kss = delta_cov(Xs, Hs, Xs, Hs, Ps, Ps, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    Kss = delta_cov(
+        Xs, Hs, Xs, Hs, Ps, Ps, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h, *_dshape(params, cfg)
+    )
     v = rho1s**2 * params.sigma_mu**2 + jnp.diag(Kss)
     mean, var = _posterior(params, data, z, cfg, S, rho1s[:, None] * Ms, C, v, rho0s)
     if noise_var_s is not None:
@@ -383,14 +409,18 @@ def _new_blocks(params: ModelParams, data, cfg: ModelConfig, S: _Setup, Xn, Hn, 
     X = jnp.asarray(data.X, dtype=float)
     H = jnp.asarray(data.H, dtype=float)
     Xn, Hn, Pn = (jnp.asarray(a, dtype=float) for a in (Xn, Hn, Pn))
-    rho0n, rho1n = rho(params, Hn, Pn)
+    rho0n, rho1n = rho(params, Hn, Pn, cfg)
     An = rho1n[:, None] * mean_basis(Xn, cfg.mean_basis)
     Kg = params.sigma_mu**2 * ard_matern(X, Xn, params.ell_mu, cfg.nu_x)
-    Kd = delta_cov(X, H, Xn, Hn, params.P, Pn, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    Kd = delta_cov(
+        X, H, Xn, Hn, params.P, Pn, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h, *_dshape(params, cfg)
+    )
     cross = jnp.where(S.mask[:, None], S.rho1[:, None] * Kg * rho1n[None, :] + Kd, 0.0)
     Knn = params.sigma_mu**2 * ard_matern(Xn, Xn, params.ell_mu, cfg.nu_x)
     k_new = rho1n[:, None] * Knn * rho1n[None, :]
-    k_new = k_new + delta_cov(Xn, Hn, Xn, Hn, Pn, Pn, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h)
+    k_new = k_new + delta_cov(
+        Xn, Hn, Xn, Hn, Pn, Pn, params.delta, cfg.h_kernel, cfg.nu_x, cfg.nu_h, *_dshape(params, cfg)
+    )
     k_new = k_new + _new_noise(params, cfg, Xn, jnp.asarray(nv, dtype=float), jnp.asarray(group))
     return _NewBlocks(cross, k_new, An, rho0n, rho1n)
 
