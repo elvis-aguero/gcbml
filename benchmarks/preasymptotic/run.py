@@ -86,7 +86,7 @@ def fit_subset(levels, x_grid, y_by_level, key, n_warmup, n_samples, cfg=CFG):
         if cfg.shape == "saturating":  # support of log h_s: the prior interval (inference module docstring)
             Hr = np.asarray(data.H)[np.asarray(data.mask)]
             pos = Hr[Hr > 0]
-            aux["hs_prior"] = [float(np.log(pos.min() / 2.0)), float(np.log(8.0 * pos.max()))]
+            aux["hs_prior"] = [float(np.log(cfg.sat_lo_factor * pos.min())), float(np.log(8.0 * pos.max()))]
     out = dict(
         **aux,
         m=np.asarray(epi["m"]).tolist(),
@@ -145,6 +145,7 @@ CANDIDATES = {  # name -> (ModelConfig, level slice)
     "ref": (CFG, slice(2, 5)),
     "sat": (dataclasses.replace(CFG, shape="saturating"), slice(0, 5)),
     "two": (dataclasses.replace(CFG, shape="two_term"), slice(0, 5)),
+    "satA3": (dataclasses.replace(CFG, shape="saturating", sat_lo_factor=1.0), slice(0, 5)),
 }
 ROUND2_CRITERIA = (
     "C1: pooled coverage of X on the pre-asymptotic family >= 0.90.",
@@ -198,7 +199,7 @@ def fit_round2(which, cand, seeds, n_warmup=600, n_samples=600, prefix="round2")
 def load_round2() -> dict:
     return {
         c: {w: json.load(open(RESULTS / f"round2_{c}_{w}.json")) for w in ("pre", "control")}
-        for c in CANDIDATES
+        for c in ("base", "ref", "sat", "two")
     }
 
 
@@ -345,6 +346,80 @@ def report2b():
     print("\n".join(lines))
 
 
+def report3():
+    """satA3 (saturating, sat_lo_factor = 1) against sat and base: C1, C2, C5 on 40 pre-asymptotic truths
+    (seeds 200-219, 400-419), C3 on control seeds 300-319. The ref fits are those of rounds 2 and 2b."""
+
+    def cat(name, which):
+        rs = json.load(open(RESULTS / f"{name}_{which}.json"))
+        return rs
+
+    def pre(c):
+        return json.load(open(RESULTS / f"round2_{c}_pre.json")) + json.load(
+            open(RESULTS / f"round2b_{c}_pre.json")
+        )
+
+    ref_pre = pre("ref")
+    ref_ctl = json.load(open(RESULTS / "round2_ref_control.json"))
+    fits = {
+        "base": (pre("base"), json.load(open(RESULTS / "round2_base_control.json"))),
+        "sat": (pre("sat"), json.load(open(RESULTS / "round2_sat_control.json"))),
+        "satA3": (cat("round3_satA3", "pre"), cat("round3_satA3", "control")),
+    }
+    lines = [
+        "| candidate | C1 pooled coverage, 40 truths (>= 0.90) | C2 median W/W_ref (<= 1.25) | C3 median W/W_ref control (<= 1.00); coverage control (>= 0.90) | C5 median relErr/relErr_ref (<= 1.50) | median relErr | median p | mean s per fit |",  # noqa: E501
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    out = {}
+    for k, (pr, ct) in fits.items():
+        assert [r["seed"] for r in pr] == [r["seed"] for r in ref_pre]
+        cov = [c for r in pr for c in r["covered"]]
+        ccov = [c for r in ct for c in r["covered"]]
+        d = dict(
+            C1=float(np.mean(cov)),
+            k=int(sum(cov)),
+            C2=float(np.median([a["W"] / b["W"] for a, b in zip(pr, ref_pre)])),
+            C3_ratio=float(np.median([a["W"] / b["W"] for a, b in zip(ct, ref_ctl)])),
+            C3_cov=float(np.mean(ccov)),
+            C5=float(np.median([a["rel_err"] / b["rel_err"] for a, b in zip(pr, ref_pre)])),
+            rel_err_med=float(np.median([a["rel_err"] for a in pr])),
+            p_med=float(np.median([a["p_median"] for a in pr])),
+            seconds=float(np.mean([a["seconds"] for a in pr + ct])),
+            dropped=int(sum(a["dropped"] for a in pr + ct)),
+            unconverged=int(sum(not a["converged"] for a in pr + ct)),
+        )
+        d["pass"] = dict(
+            C1=d["C1"] >= 0.9,
+            C2=d["C2"] <= 1.25,
+            C3=d["C3_ratio"] <= 1.0 and d["C3_cov"] >= 0.9,
+            C5=d["C5"] <= 1.5,
+        )
+        out[k] = d
+        ps = d["pass"]
+        lines.append(
+            f"| {k} | {d['C1']:.3f} ({d['k']}/360) {ps['C1']} | {d['C2']:.3f} {ps['C2']} | "
+            f"{d['C3_ratio']:.3f}; {d['C3_cov']:.3f} {ps['C3']} | {d['C5']:.3f} {ps['C5']} | "
+            f"{d['rel_err_med']:.4f} | {d['p_med']:.2f} | {d['seconds']:.0f} |"
+        )
+    sa = [r for r in fits["satA3"][0] if "hs_prior" in r]
+    narrow = np.mean(
+        [(r["aux_q"][0][2] - r["aux_q"][0][0]) < 0.5 * (r["hs_prior"][1] - r["hs_prior"][0]) for r in sa]
+    )
+    corr = np.corrcoef([r["aux_q"][0][1] for r in sa], [math.log(r["truth"]["h_s"]) for r in sa])[0, 1]
+    lines += [
+        "",
+        "Pre-asymptotic: seeds 200-219 and 400-419 (base, sat from rounds 2 and 2b; satA3 new). Control: seeds 300-319. Reference: ref fits of rounds 2 and 2b.",  # noqa: E501
+        "satA3 = saturating shape with log h_s ~ U[log h_min, log(8 h_max)] (sat_lo_factor = 1); sat uses 0.5. C5 was added after round 1.",  # noqa: E501
+        f"satA3 log h_s posterior: 90% interval narrower than half the prior range in {narrow:.2f} of truths; corr(posterior median, true log h_s) = {corr:.2f}.",  # noqa: E501
+        "Dropped / unconverged fits: "
+        + ", ".join(f"{k} {v['dropped']}/{v['unconverged']}" for k, v in out.items())
+        + ".",  # noqa: E501
+    ]
+    json.dump(out, open(RESULTS / "round3.json", "w"), indent=1)
+    (RESULTS / "round3.md").write_text("\n".join(lines) + "\n")
+    print("\n".join(lines))
+
+
 def plot2(res):
     import matplotlib
 
@@ -469,6 +544,8 @@ def plot(res):
 def main(argv):
     if argv[0] == "report":
         return report()
+    if argv[0] == "report3":
+        return report3()
     if argv[0] == "report2b":
         return report2b()
     if argv[0] == "report2":

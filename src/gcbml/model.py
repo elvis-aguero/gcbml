@@ -81,6 +81,7 @@ class ModelConfig:
         "power"  # error shape b(hbar): "power", "saturating", "two_term" (kernels.err_shape); twy2 only
     )
     sat_m: float = 4.0  # sharpness m of the "saturating" shape (ASSUMPTION, not inferred)
+    sat_lo_factor: float = 0.5  # prior of log h_s: U[log(sat_lo_factor * h_min), log(8 h_max)] (ASSUMPTION)
 
 
 class ModelParams(NamedTuple):

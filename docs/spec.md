@@ -182,7 +182,8 @@ By default every level obeys one power law, \(b(\bar h) = \bar h^{p}\), in the t
 Stated assumptions (none comes from the data of a particular application):
 
 - The sharpness \(m\) of the saturating shape is fixed: `ModelConfig.sat_m = 4.0`. It is not inferred.
-- Prior of the saturating shape: \(\log h_s \sim \mathrm{Uniform}[\log(h_{\min}/2),\ \log(8 h_{\max})]\), with \(h_{\min}\), \(h_{\max}\) the smallest and largest positive \(\bar h\) of the real data rows. It is a bounded coordinate for the slice sampler.
+- Prior of the saturating shape: \(\log h_s \sim \mathrm{Uniform}[\log(f\,h_{\min}),\ \log(8 h_{\max})]\), with \(f\) = `ModelConfig.sat_lo_factor` (default 0.5), with \(h_{\min}\), \(h_{\max}\) the smallest and largest positive \(\bar h\) of the real data rows. It is a bounded coordinate for the slice sampler.
+  - With \(f = 1\) the prior states that the finest level is at least at the edge of the asymptotic range (assumption A3 for the finest level). With \(f = 0.5\) all data may lie on the saturation plateau, where \(\mu\) is not separately identified.
 - Prior of the two-term shape: \(w \sim N(0, 1)\) and \(\mathrm{aux}_1 \sim N(0, 1)\).
 
 ### 2.4 Noise

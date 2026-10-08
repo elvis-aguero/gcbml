@@ -208,3 +208,23 @@ def test_g_prior_chain_two_term_aux_is_standard_normal():
     for i in range(2):
         p = _ks_thinned(post.theta["aux"][..., i], stats.norm.cdf)
         assert p > 0.01, (i, p)
+
+
+def test_h_lo_factor_default_reproduces_current_prior_bounds():
+    data, zp = _small_data()
+    assert ModelConfig().sat_lo_factor == 0.5
+    sampler = inference._Sampler(data, zp, zp, ModelConfig(shape="saturating"), SCALES, 1, False)
+    np.testing.assert_array_equal(np.asarray(sampler.aux.hs_bounds), np.array(_hs_bounds(data)))
+
+
+def test_g_prior_chain_saturating_log_hs_uniform_with_lo_factor_one():
+    data, zp = _small_data()
+    post = inference._fit_impl(
+        jax.random.key(6), data, zp, zp, ModelConfig(shape="saturating", sat_lo_factor=1.0), SCALES, 1,
+        200, 1500, 4, likelihood_weight=0.0,
+    )  # fmt: skip
+    H = np.asarray(data.H)[np.asarray(data.mask)]
+    lo, hi = np.log(H[H > 0].min()), np.log(8.0 * H.max())
+    a = post.theta["aux"][..., 0]
+    assert np.all((a >= lo) & (a <= hi))
+    assert _ks_thinned(a, stats.uniform(loc=lo, scale=hi - lo).cdf) > 0.01

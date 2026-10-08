@@ -39,7 +39,8 @@ then N_INIT_SWEEPS = 30 slice sweeps update theta only (zeta, pi and z fixed, wi
 
 Error shape (optional, cfg.shape != "power", twy2 only; kernels.err_shape): theta gains ``aux`` (1 entry for
 "saturating", 2 for "two_term"), and ModelParams.aux is it padded with zeros to 2. Priors (each a stated
-ASSUMPTION): "saturating": log h_s ~ Uniform[log(h_min / 2), log(8 h_max)] with h_min, h_max the smallest and
+ASSUMPTION): "saturating": log h_s ~ Uniform[log(sat_lo_factor h_min), log(8 h_max)] (default 0.5),
+with h_min, h_max the smallest and
 largest positive hbar of the real rows (computed from data.H; the bounds are carried in _Aux.hs_bounds); it is
 a bounded coordinate: the log density is -inf outside the interval, which the slice sampler handles, and the
 prior draw is uniform on it. "two_term": w = aux[0] ~ N(0, 1), aux[1] ~ N(0, 1) (q = p sigmoid(aux[1])).
@@ -247,7 +248,7 @@ class _Sampler:
         Hr = np.asarray(data.H, dtype=float)[mask]
         pos = Hr[Hr > 0]
         hs_bounds = (
-            np.array([np.log(pos.min() / 2.0), np.log(8.0 * pos.max())])
+            np.array([np.log(cfg.sat_lo_factor * pos.min()), np.log(8.0 * pos.max())])
             if pos.size
             else np.array([-1.0, 1.0])
         )
