@@ -13,7 +13,11 @@ ard_matern(X1, X2, ell, nu)
     (n1, n2) matrix of matern(r) with r_ij = sqrt(sum_k ((X1_ik - X2_jk) / ell_k)^2). Must be exactly
     symmetric when X1 is X2 (compute r from squared differences, clip at 0 before sqrt).
 
-twy2(h1, h2, p1, p2, ell_h, nu)
+err_shape(h, p, shape, aux, sat_m=4.0)
+    Error shape b(h) (0 at h = 0): "power" h^p; "saturating" h^p / (1 + (h/h_s)^m)^(p/m); "two_term"
+    h^p + w h^q (see the function).
+
+twy2(h1, h2, p1, p2, ell_h, nu, shape, aux, sat_m)
     TWY2 kernel in h (Tuo, Wu & Yu 2014; Bect et al. 2103.14559 Prop. 3 with L = 2p), with an order
     that may differ per row (spec 2.3, "order that can vary with x"):
         k(i, j) = h1_i^{p1_i} * h2_j^{p2_j} * matern(|h1_i - h2_j| / ell_h, nu)
@@ -38,6 +42,7 @@ from __future__ import annotations
 import math
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 
@@ -87,10 +92,38 @@ def _hpow(h, p):
     return jnp.where(pos, jnp.where(pos, h, 1.0) ** p, 0.0)
 
 
-def twy2(h1, h2, p1, p2, ell_h, nu: float = 1.5) -> jnp.ndarray:
-    """k(i, j) = h1_i^{p1_i} h2_j^{p2_j} matern(|h1_i - h2_j| / ell_h, nu), exactly 0 where hbar = 0."""
+SHAPES = ("power", "saturating", "two_term")
+
+
+def err_shape(h, p, shape: str = "power", aux=None, sat_m: float = 4.0):
+    """Error shape b(h), exactly 0 (and with a finite gradient) at h = 0.
+
+    "power": h^p. "saturating": h^p / (1 + (h / h_s)^m)^(p / m), h_s = exp(aux[0]), m = sat_m (h_s -> inf
+    gives the power law). "two_term": h^p + w h^q, w = aux[0], q = p sigmoid(aux[1]) (0 < q < p).
+    """
+    if shape not in SHAPES:
+        raise ValueError(f"shape must be one of {SHAPES}, got {shape!r}")
+    h = jnp.asarray(h, dtype=float)
+    pos = h > 0
+    hs = jnp.where(pos, h, 1.0)
+    base = hs**p
+    if shape == "power":
+        b = base
+    elif shape == "saturating":
+        h_s = jnp.exp(aux[0])
+        b = base / (1.0 + (hs / h_s) ** sat_m) ** (p / sat_m)
+    else:
+        b = base + aux[0] * hs ** (p * jax.nn.sigmoid(aux[1]))
+    return jnp.where(pos, b, 0.0)
+
+
+def twy2(h1, h2, p1, p2, ell_h, nu: float = 1.5, shape: str = "power", aux=None, sat_m: float = 4.0):
+    """k(i, j) = b(h1_i; p1_i) b(h2_j; p2_j) matern(|h1_i - h2_j| / ell_h, nu), exactly 0 where hbar = 0.
+
+    b is err_shape (the power law h^p by default).
+    """
     h1, h2 = jnp.asarray(h1, dtype=float), jnp.asarray(h2, dtype=float)
-    b1, b2 = _hpow(h1, p1), _hpow(h2, p2)
+    b1, b2 = err_shape(h1, p1, shape, aux, sat_m), err_shape(h2, p2, shape, aux, sat_m)
     d = jnp.abs(h1[:, None] - h2[None, :]) / ell_h
     return b1[:, None] * b2[None, :] * matern(d, nu)
 
@@ -107,20 +140,35 @@ def lifted_brownian(h1, h2, p, gamma, a=1.0) -> jnp.ndarray:
 
 
 def delta_cov(
-    X1, H1, X2, H2, P1, P2, comps: DeltaParams, h_kernel: str, nu_x: float = 2.5, nu_h: float = 1.5
+    X1,
+    H1,
+    X2,
+    H2,
+    P1,
+    P2,
+    comps: DeltaParams,
+    h_kernel: str,
+    nu_x: float = 2.5,
+    nu_h: float = 1.5,
+    shape: str = "power",
+    aux=None,
+    sat_m: float = 4.0,
 ) -> jnp.ndarray:
     """Additive multi-component error covariance sum_j sigma_j^2 k_x,j k_h,j (spec 2.3).
 
     For ``h_kernel == "lb"`` the order is shared, so it is read from row 0 of column j of P1 (and P2 is
-    ignored): put real rows first and keep the column constant.
+    ignored): put real rows first and keep the column constant. ``shape`` (err_shape; aux (2,) shared by
+    the components) applies to "twy2" only: any other shape with "lb" raises ValueError.
     """
     if h_kernel not in ("twy2", "lb"):
         raise ValueError(f"h_kernel must be 'twy2' or 'lb', got {h_kernel!r}")
+    if h_kernel == "lb" and shape != "power":
+        raise ValueError("error shapes other than 'power' need h_kernel='twy2'")
     K = 0.0
     for j in range(comps.sigma.shape[0]):
         kx = ard_matern(X1, X2, comps.ell_x[j], nu_x)
         if h_kernel == "twy2":
-            kh = twy2(H1[:, j], H2[:, j], P1[:, j], P2[:, j], comps.ell_h[j], nu_h)
+            kh = twy2(H1[:, j], H2[:, j], P1[:, j], P2[:, j], comps.ell_h[j], nu_h, shape, aux, sat_m)
         else:
             kh = lifted_brownian(H1[:, j], H2[:, j], P1[0, j], comps.gamma[j])
         K = K + comps.sigma[j] ** 2 * kx * kh

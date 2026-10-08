@@ -37,6 +37,13 @@ Starting rule [assumption]: per chain, 16 candidate states are drawn from the pr
 the first one with a finite log density is kept (not the best one: the starts stay over-dispersed), and
 then N_INIT_SWEEPS = 30 slice sweeps update theta only (zeta, pi and z fixed, widths 1).
 
+Error shape (optional, cfg.shape != "power", twy2 only; kernels.err_shape): theta gains ``aux`` (1 entry for
+"saturating", 2 for "two_term"), and ModelParams.aux is it padded with zeros to 2. Priors (each a stated
+ASSUMPTION): "saturating": log h_s ~ Uniform[log(h_min / 2), log(8 h_max)] with h_min, h_max the smallest and
+largest positive hbar of the real rows (computed from data.H; the bounds are carried in _Aux.hs_bounds); it is
+a bounded coordinate: the log density is -inf outside the interval, which the slice sampler handles, and the
+prior draw is uniform on it. "two_term": w = aux[0] ~ N(0, 1), aux[1] ~ N(0, 1) (q = p sigmoid(aux[1])).
+
 Further assumptions: (a) surrogate noise for zeta (Murray & Adams Section 3.2): site i with n_i rows has
 the Fisher variance 2 / n_i of log s^2 and S_ii = 1 / max(n_i / 2 - 1 / sigma_z^2, 0.25 / sigma_z^2)
 (eq 12 with the positivity threshold), a valid choice for any S > 0; (b) surrogate noise for pi_j is the
@@ -136,6 +143,14 @@ def _pc_sample(key, sigma0, ell0, ell_shape):
     return log_sigma, log_ell
 
 
+def _n_aux(cfg: ModelConfig) -> int:
+    if cfg.shape not in ("power", "saturating", "two_term"):
+        raise ValueError(f"unknown error shape {cfg.shape!r}")
+    if cfg.shape != "power" and cfg.h_kernel != "twy2":
+        raise ValueError("error shapes other than 'power' need h_kernel='twy2'")
+    return {"power": 0, "saturating": 1, "two_term": 2}[cfg.shape]
+
+
 class _Layout:
     """Names, shapes and offsets of the global vector theta (module docstring)."""
 
@@ -154,6 +169,8 @@ class _Layout:
         elif cfg.gamma_fixed is None:
             fields.append(("logit_gamma", (k,)))
         fields += [("m_s", ()), ("b_s", (k,))]
+        if cfg.shape != "power":
+            fields.append(("aux", (_n_aux(cfg),)))
         if cfg.within_run:
             fields.append(("log_ell_v", ()))
         self.fields = fields
@@ -191,6 +208,7 @@ class _Aux(NamedTuple):
     xs: jnp.ndarray  # (nx_pad, d) distinct unit coordinates (varying order only)
     x_row: jnp.ndarray
     x_mask: jnp.ndarray
+    hs_bounds: jnp.ndarray  # (2,) log(h_min / 2), log(8 h_max): support of log h_s ("saturating")
 
     @property
     def data(self) -> PaddedData:
@@ -226,6 +244,13 @@ class _Sampler:
             xs, x_row, x_mask = noise.unique_rows(X, mask)
         else:
             xs, x_row, x_mask = np.zeros((1, self.d)), np.zeros(self.n_pad, dtype=np.int64), np.ones(1, bool)
+        Hr = np.asarray(data.H, dtype=float)[mask]
+        pos = Hr[Hr > 0]
+        hs_bounds = (
+            np.array([np.log(pos.min() / 2.0), np.log(8.0 * pos.max())])
+            if pos.size
+            else np.array([-1.0, 1.0])
+        )
         self.aux = _Aux(
             jnp.asarray(X),
             jnp.asarray(data.H, dtype=float),
@@ -242,6 +267,7 @@ class _Sampler:
             jnp.asarray(xs),
             jnp.asarray(x_row),
             jnp.asarray(x_mask),
+            jnp.asarray(hs_bounds),
         )
         self.n_sites = sites.shape[0]
         self.n_xs = xs.shape[0]
@@ -271,6 +297,9 @@ class _Sampler:
         delta = DeltaParams(jnp.exp(t["log_sigma_delta"]), jnp.exp(t["log_ell_x"]), ell_h, gamma)
         nv = noise.noise_var(t["m_s"], t["b_s"], zeta, a.sites, a.row_site, a.mask)
         ell_v = jnp.exp(t["log_ell_v"]) if self.cfg.within_run else jnp.ones(())
+        aux = jnp.zeros(2)
+        if self.cfg.shape != "power":
+            aux = aux.at[: t["aux"].shape[-1]].set(t["aux"])
         return ModelParams(
             jnp.exp(t["log_sigma_mu"]),
             jnp.exp(t["log_ell_mu"]),
@@ -280,6 +309,7 @@ class _Sampler:
             delta,
             nv,
             ell_v,
+            aux,
         )
 
     def loglik(self, t, zeta, pi, z):
@@ -305,6 +335,12 @@ class _Sampler:
         lp += noise.log_prior(t["m_s"], t["b_s"], hz[0], hz[1:], sc)
         if self.cfg.within_run:
             lp += _pc_ell_logpdf(t["log_ell_v"], sc.ell0)
+        if self.cfg.shape == "saturating":
+            lo, hi = self.aux.hs_bounds[0], self.aux.hs_bounds[1]
+            inside = (t["aux"][0] >= lo) & (t["aux"][0] <= hi)
+            lp += jnp.where(inside, -jnp.log(hi - lo), -jnp.inf)
+        elif self.cfg.shape == "two_term":
+            lp += normal_logpdf(t["aux"], 0.0, 1.0)
         return lp
 
     def log_prior_hz(self, hz):
@@ -353,6 +389,11 @@ class _Sampler:
         t["b_s"] = sc.b_s_sd * jax.random.normal(ks[7], (k,))
         if self.cfg.within_run:
             t["log_ell_v"] = _pc_sample(ks[8], 1.0, sc.ell0, (1,))[1][0]
+        if self.cfg.shape == "saturating":
+            lo, hi = self.aux.hs_bounds[0], self.aux.hs_bounds[1]
+            t["aux"] = jax.random.uniform(ks[13], (1,), minval=lo, maxval=hi)
+        elif self.cfg.shape == "two_term":
+            t["aux"] = jax.random.normal(ks[13], (2,))
         theta = jnp.concatenate([jnp.reshape(t[name], (-1,)) for name, _ in self.layout.fields])
         lsz, lez = _pc_sample(ks[9], 1.0, sc.ell0, (self.n_hz - 1,))
         hz = jnp.concatenate([lsz[None], lez])

@@ -171,6 +171,20 @@ $$ \delta(x, h) = \sum_{j=1}^{k} \delta_j(x, h_j), \quad \delta_j \sim GP(0, \; 
   - The prior variance of the error is \(\sum_j \sigma_{\delta,j}^2 k_{x,j}(x,x) \bar h_j^{2p_j(x)}\). It goes to 0 as \(h \to 0\), and it is monotone in the componentwise order.
   - The orders are learned (Section 2.5).
 
+#### Error shape (optional)
+
+By default every level obeys one power law, \(b(\bar h) = \bar h^{p}\), in the two places where it enters: the trend (\(\rho_0 = \sum_j c_{0j} b_j\), \(\rho_1 = 1 + \sum_j c_{1j} b_j\)) and the TWY2 kernel (\(k_h = b(\bar h) b(\bar h') c_\nu\)). `ModelConfig.shape` replaces \(b\) in both places by one function `kernels.err_shape`, for \(h_k\) = TWY2 only (LB raises `ValueError`). Each shape has \(b(0) = 0\) and a finite gradient at 0. Extra parameters `aux` (2 entries) are shared by all components.
+
+- `"power"` (default): \(b = \bar h^{p}\). No `aux`. Reproduces the earlier numbers bit for bit.
+- `"saturating"`: \(b = \bar h^{p} / (1 + (\bar h / h_s)^m)^{p/m}\), \(h_s = e^{\mathrm{aux}_0}\). It is \(\approx \bar h^{p}\) for \(\bar h \ll h_s\) and tends to \(h_s^{p}\) for \(\bar h \gg h_s\). \(h_s \to \infty\) gives the power law.
+- `"two_term"`: \(b = \bar h^{p} + w \bar h^{q}\), \(w = \mathrm{aux}_0\), \(q = p\,u\), \(u = \mathrm{sigmoid}(\mathrm{aux}_1)\), so \(0 < q < p\): a lower-order second term.
+
+Stated assumptions (none comes from the data of a particular application):
+
+- The sharpness \(m\) of the saturating shape is fixed: `ModelConfig.sat_m = 4.0`. It is not inferred.
+- Prior of the saturating shape: \(\log h_s \sim \mathrm{Uniform}[\log(h_{\min}/2),\ \log(8 h_{\max})]\), with \(h_{\min}\), \(h_{\max}\) the smallest and largest positive \(\bar h\) of the real data rows. It is a bounded coordinate for the slice sampler.
+- Prior of the two-term shape: \(w \sim N(0, 1)\) and \(\mathrm{aux}_1 \sim N(0, 1)\).
+
 ### 2.4 Noise
 
 $$ e_a \sim N(0, S_a), \quad S_a = D_a R_a D_a $$
