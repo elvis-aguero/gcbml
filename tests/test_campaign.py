@@ -694,8 +694,8 @@ def test_g4_size_on_data_from_the_models_own_prior_is_at_most_3_of_20(capsys):
 @pytest.mark.slow
 @pytest.mark.xfail(
     strict=False,
-    reason="measured: 0 of 10 seeds fail at either amplitude; the delta GP absorbs a smooth term at hbar = 1 "
-    "(posterior sigma_delta ~ 2.1 against a prior scale 0.5), so the level is predicted well enough",
+    reason="G4 v3 does not detect pre-asymptotic levels: the delta GP absorbs the offset (same result on "
+    "real data, p-value 0.97). A shape option for the error model (branch `shape`) is the planned remedy",
 )
 @pytest.mark.parametrize("amp", [1.5, 5.0])
 def test_g4_power_a_preasymptotic_coarsest_level_fails_in_most_seeds(amp, monkeypatch, capsys):
