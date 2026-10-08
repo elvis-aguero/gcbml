@@ -182,10 +182,10 @@ def run_truth_r2(seed, family, cand, n_warmup, n_samples):
     return rec
 
 
-def fit_round2(which, cand, seeds, n_warmup=600, n_samples=600):
+def fit_round2(which, cand, seeds, n_warmup=600, n_samples=600, prefix="round2"):
     family = C.FAMILY if which == "pre" else C.CONTROL
     RESULTS.mkdir(exist_ok=True)
-    path = RESULTS / f"round2_{cand}_{which}.json"
+    path = RESULTS / f"{prefix}_{cand}_{which}.json"
     done = {r["seed"]: r for r in json.load(open(path))} if path.exists() else {}
     for s in seeds:
         if s in done:
@@ -293,6 +293,55 @@ def report2():
         )
     (RESULTS / "round2.md").write_text("\n".join(lines) + "\n")
     plot2(res)
+    print("\n".join(lines))
+
+
+SEEDS_PRE_R2B = tuple(range(400, 420))
+
+
+def report2b():
+    """Replicate of round 2 on fresh pre-asymptotic seeds 400-419 (base, ref, sat); same C1, C2, C5."""
+    res = {c: json.load(open(RESULTS / f"round2b_{c}_pre.json")) for c in ("base", "ref", "sat")}
+    old = {c: json.load(open(RESULTS / f"round2_{c}_pre.json")) for c in ("base", "ref", "sat")}
+    lines = [
+        "| candidate | C1 coverage (>= 0.90), k of 180 | C2 median W/W_ref (<= 1.25) | C5 median relErr/relErr_ref (<= 1.50) | median relErr | median p | combined C1, 40 truths (k of 360) | per-truth coverage fraction: min, 25%, median, 75%, max |",  # noqa: E501
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    out = {}
+    for k in ("base", "sat", "ref"):
+        r, ref = res[k], res["ref"]
+        cov = [c for t in r for c in t["covered"]]
+        both = cov + [c for t in old[k] for c in t["covered"]]
+        frac = [float(np.mean(t["covered"])) for t in r]
+        d = dict(
+            k=int(sum(cov)),
+            C1=float(np.mean(cov)),
+            C2=float(np.median([a["W"] / b["W"] for a, b in zip(r, ref)])),
+            C5=float(np.median([a["rel_err"] / b["rel_err"] for a, b in zip(r, ref)])),
+            rel_err_med=float(np.median([a["rel_err"] for a in r])),
+            p_med=float(np.median([a["p_median"] for a in r])),
+            k_both=int(sum(both)),
+            C1_both=float(np.mean(both)),
+            frac_q=np.percentile(frac, [0, 25, 50, 75, 100]).tolist(),
+            dropped=int(sum(a["dropped"] for a in r)),
+            unconverged=int(sum(not a["converged"] for a in r)),
+        )
+        out[k] = d
+        lines.append(
+            f"| {k} | {d['C1']:.3f} ({d['k']}/180) {d['C1'] >= 0.9} | {d['C2']:.3f} {d['C2'] <= 1.25} | "
+            f"{d['C5']:.3f} {d['C5'] <= 1.5} | {d['rel_err_med']:.4f} | {d['p_med']:.2f} | "
+            f"{d['C1_both']:.3f} ({d['k_both']}/360) | {np.round(d['frac_q'], 2).tolist()} |"
+        )
+    lines += [
+        "",
+        "Seeds 400-419, pre-asymptotic family only; same criteria and thresholds as round 2 (C5 was added after round 1).",  # noqa: E501
+        "Combined C1 pools these seeds with round-2 seeds 200-219.",
+        "Dropped (rhat > 1.05, re-run) / unconverged: "
+        + ", ".join(f"{k} {out[k]['dropped']}/{out[k]['unconverged']}" for k in out)
+        + ".",
+    ]
+    json.dump(out, open(RESULTS / "round2b.json", "w"), indent=1)
+    (RESULTS / "round2b.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 
 
@@ -420,6 +469,8 @@ def plot(res):
 def main(argv):
     if argv[0] == "report":
         return report()
+    if argv[0] == "report2b":
+        return report2b()
     if argv[0] == "report2":
         return report2()
     which = argv[1]
@@ -434,6 +485,8 @@ def main(argv):
             cand = argv[i + 1]
             if "--seeds" not in argv:
                 seeds = SEEDS_PRE_R2 if which == "pre" else SEEDS_CONTROL_R2
+        if a == "--prefix":
+            kw["prefix"] = argv[i + 1]
         if a == "--warmup":
             kw["n_warmup"] = int(argv[i + 1])
         if a == "--samples":
