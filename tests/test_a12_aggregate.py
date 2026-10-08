@@ -10,9 +10,18 @@ from benchmarks.a12 import aggregate_a12 as ag
 def cand(level, acq_ratio, value, n=10, gain=None, acq_gain=1.0):
     gain = value * 2.0 if gain is None else gain
     return dict(
-        level=level, acq_ratio=acq_ratio, oracle_value=value, oracle_gain=gain, acq_gain=acq_gain, n_fantasies=n,
-        n_discarded=0, n_rhat_dropped=0, rel_se=0.1 if n else float("nan"), rhat_p0=1.01, cost_mean=2.0,
-    )  # fmt: skip
+        level=level,
+        acq_ratio=acq_ratio,
+        oracle_value=value,
+        oracle_gain=gain,
+        acq_gain=acq_gain,
+        n_fantasies=n,
+        n_discarded=0,
+        n_rhat_dropped=0,
+        rel_se=0.1 if n else float("nan"),
+        rhat_p0=1.01,
+        cost_mean=2.0,
+    )
 
 
 def truth(seed, cands):

@@ -527,7 +527,7 @@ class Campaign:
             hyper={k: v[idx] for k, v in post.hyper.items()}, log2c=jnp.asarray(post.log2c)[idx]
         )
 
-    def _price(self, post, us, levels, log2q):
+    def _price(self, post, us, levels, log2q, with_pf: bool = False):
         """(E[min(c, cap)], cap) of runs at controls ``us`` (physical) and diagonal levels."""
         lo, hi = self._region_full()
         U = (np.asarray(us, float).reshape(len(us), self._nc) - lo) / (hi - lo)
@@ -550,6 +550,8 @@ class Campaign:
         # exp(m + s^2/2) overflows to inf for an enormous predictive variance and inf * 0 is nan in
         # cost.expected_capped_cost; the price can never exceed the cap, which is the fallback and the bound
         capped = np.where(np.isfinite(capped), np.minimum(capped, cap), cap)
+        if with_pf:  # P(c <= cap): the acquisition multiplies each gain by it (spec 2.6)
+            return capped[:m], cap[:m], np.asarray(cost.prob_finish(mean, var, w, cap))[:m]
         return capped[:m], cap[:m]
 
     # ------------------------------------------------------------------ data
@@ -572,7 +574,7 @@ class Campaign:
 
     def _fit_all(
         self, data: PaddedData, key, skip_note: list | None = None, init: list | dict | None = None,
-        n_warmup: int | None = None,
+        n_warmup: int | None = None, max_extensions: int | None = None,
     ) -> list[_Fit]:  # fmt: skip
         """Fit every structure (in parallel threads when PARALLEL_FITS: the fits are independent, each one
         keyed by fold_in(key, i), so the result does not depend on the scheduling)."""
@@ -598,13 +600,16 @@ class Campaign:
                 "no structure can be fitted: the outputs are outside the domain of every transform"
             )
 
+        # None: inference.fit's default (the main fit after tell); 0: no automatic extension (refits)
+        ext = {} if max_extensions is None else {"max_extensions": max_extensions}
+
         def one(job):
             i, name, hk, tf, ini = job
             cfg = ModelConfig(h_kernel=hk, increasing=(tf.name != "reciprocal"))
             z = np.asarray(tf.forward(jnp.asarray(y)))
             post = inference.fit(
                 jax.random.fold_in(key, i), data, z, z, cfg, self.scales, self._nc,
-                n_warmup, s.n_samples, s.n_chains, s.varying_order, init=ini,
+                n_warmup, s.n_samples, s.n_chains, s.varying_order, init=ini, **ext,
             )  # fmt: skip
             params, zs = inference.flatten(post)
             idx = _thin_idx(int(zs.shape[0]), N_ACQ_DRAWS)
@@ -741,7 +746,7 @@ class Campaign:
         if not self.WARM_START:
             return {}
         init = {n: types.SimpleNamespace(theta=d) for n, d in self._last_draws(fits).items()}
-        return {"init": init, "n_warmup": self._warm_warmup()}
+        return {"init": init, "n_warmup": self._warm_warmup(), "max_extensions": 0}
 
     def _warm_warmup(self) -> int:
         return max(self.WARM_MIN, round(self.WARM_FRACTION * self.settings.n_warmup))
@@ -793,13 +798,16 @@ class Campaign:
             # the main fit and the hold-out fit are independent (both start at the previous analysis' draws)
             with ThreadPoolExecutor(max_workers=2) as ex:
                 f_main = ex.submit(self._fit_all, data, key, skipped, **kw_main)
-                f_tr = ex.submit(self._fit_all, plan[0], jax.random.fold_in(key, 77), **kw_main)
+                f_tr = ex.submit(
+                    self._fit_all, plan[0], jax.random.fold_in(key, 77), **{**kw_main, "max_extensions": 0}
+                )
                 fits, fits_tr = f_main.result(), f_tr.result()
         else:
             fits = self._fit_all(data, key, skipped, **kw_main)
         if plan[0] is not None and len(fits) != len(self.settings.h_kernels) * len(self.problem.transforms):
             plan, fits_tr = self._holdout_plan(data, levels, len(fits)), None  # a structure was dropped
         weights, wnote, g1 = self._stacking(data, levels, fits, key, plan, fits_tr)
+        self._record("fit", n_extensions=[int(f.post.diagnostics.n_extensions) for f in fits])
         structures = self._weighted(fits, weights)
         moments = self._moments(fits, data, Xs)
         draws, w = self._pool(fits, weights, moments, jax.random.fold_in(key, 5))
@@ -1173,15 +1181,21 @@ class Campaign:
             hq = np.array([x is not None and x > 0 for x in raw])
             lq = np.array([math.log2(x) if h else 0.0 for x, h in zip(raw, hq, strict=True)])
             q = (lq, hq)
-        mean, cap = self._price(post, [p.u for p in probes], lvl, q)
+        mean, cap, pfin = self._price(post, [p.u for p in probes], lvl, q, with_pf=True)
         lo, hi = self._region_full()
         cands = []
-        for p, c, cp_, lv in zip(probes, mean, cap, lvl, strict=True):
+        for p, c, cp_, lv, pf_ in zip(probes, mean, cap, lvl, pfin, strict=True):
             hbar = self.problem.resolution.hbar(np.asarray(p.h))
             xu = self.problem.inputs.to_unit(np.asarray(p.u, float))[None, :]
             cands.append(
                 Candidate(
-                    xu, hbar, np.full(self._k, int(lv)), float(c), float(cp_), self._noise_var(an, hbar)
+                    xu,
+                    hbar,
+                    np.full(self._k, int(lv)),
+                    float(c),
+                    float(cp_),
+                    self._noise_var(an, hbar),
+                    float(pf_),
                 )
             )
         return cands, probes, cap, mean
@@ -1525,7 +1539,7 @@ def refit_H(campaign: Campaign, an: _Analysis, dataset: Dataset, key, warm: bool
 
     data2, _ = campaign._build_data(dataset)
     init = [f.post for f in an.fits] if warm else None
-    fits2 = campaign._fit_all(data2, key, init=init, n_warmup=n_warmup)
+    fits2 = campaign._fit_all(data2, key, init=init, n_warmup=n_warmup, max_extensions=0)
     structs2 = campaign._weighted(fits2, an.weights)
     sig2 = np.asarray(acq.sigma_epi_physical(structs2, data2, campaign.problem.sigma_n))
     rhat = max(float(dg.rhat(np.asarray(f.post.theta["log_p0"])[..., 0])) for f in fits2)

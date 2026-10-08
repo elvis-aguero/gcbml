@@ -60,7 +60,7 @@ def _fake_gates(failing=()):
     return gates_
 
 
-def _fake_fit_all(self, data, key, skip_note=None, init=None, n_warmup=None):
+def _fake_fit_all(self, data, key, skip_note=None, init=None, n_warmup=None, max_extensions=None):
     """Stand-in for the MCMC fits: 4 fixed-hyperparameter draws per structure (no sampler, no compilation).
 
     The posterior of mu and of the levels is still computed from the real data by the real GP algebra, so
@@ -101,7 +101,7 @@ def _fake_fit_all(self, data, key, skip_note=None, init=None, n_warmup=None):
                 "log_p0": np.full((1, 4, k), np.log(1.4)) + 0.05 * np.arange(4)[None, :, None],
             }
             sp = StructurePosterior(params, z, cfg, tf, 1.0)
-            post = types.SimpleNamespace(theta=theta)
+            post = types.SimpleNamespace(theta=theta, diagnostics=types.SimpleNamespace(n_extensions=0))
             fits.append(_Fit(f"{hk}/{tname}", cfg, tf, post, sp, np.arange(4), params, z))
     return fits
 
@@ -722,3 +722,30 @@ def test_parallel_fits_give_the_same_posteriors_as_serial_fits(monkeypatch):
     assert [f.name for f in par] == [f.name for f in ser] == ["twy2/identity", "lb/identity"]
     for a, b in zip(par, ser, strict=True):
         np.testing.assert_array_equal(a.post.theta["log_p0"], b.post.theta["log_p0"])
+
+
+@pytest.mark.usefixtures("no_gates")
+def test_refits_do_not_extend_the_chains_but_the_main_fit_does_and_n_extensions_is_logged(monkeypatch):
+    seen = []
+    real = Campaign._fit_all
+
+    def spy(self, data, key, skip_note=None, init=None, n_warmup=None, max_extensions=None):
+        seen.append(max_extensions)
+        return real(self, data, key, skip_note, init, n_warmup, max_extensions)
+
+    monkeypatch.setattr(Campaign, "_fit_all", spy)
+    t = A12Truth(6, d=1, budget=1e6, eps_abs=1e-4)
+    c = make(t)
+    run_initial(c, t)
+    c._analyse()
+    assert seen[0] is None  # the main fit after tell: inference.fit's default (extends on rhat / ESS)
+    fit_events = [h for h in c.history if h["event"] == "fit"]
+    assert fit_events and fit_events[-1]["n_extensions"] == [0]
+    from gcbml import campaign as cp
+
+    an = c._analyse()
+    cand = c.plan(key=jax.random.PRNGKey(0)).cands[0]
+    ds = cp.fantasy_dataset(c, cand, 0.1, "x")
+    seen.clear()
+    cp.refit_H(c, an, ds, jax.random.PRNGKey(1))
+    assert seen == [0]  # a fantasy refit: no extension

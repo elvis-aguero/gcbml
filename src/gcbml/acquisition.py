@@ -123,6 +123,7 @@ class Candidate(NamedTuple):
     cost_mean: float
     cost_cap: float
     noise_var: Any
+    p_finish: float = 1.0  # P(c <= cap): the gain is multiplied by it (spec 2.6, Step 5)
 
 
 class StructurePosterior(NamedTuple):
@@ -688,13 +689,16 @@ def select_batch(
     c_rem = float(budget_remaining) - sum(float(p.cost_cap) for p in pend)
     caps = np.array([float(c.cost_cap) for c in cands])
     costs = np.array([float(c.cost_mean) for c in cands])
+    # the gain is multiplied by P(finish before the cap): gain * pf / cost = gain / (cost / pf)
+    pf = np.clip(np.array([float(c.p_finish) for c in cands]), 1e-12, 1.0)
+    eff = costs / pf
     available = np.ones(n, dtype=bool)
     chosen, table = [], None
     for step in range(q):
         adm = available & (caps <= c_rem)
         blocks = [int(i) for i in np.flatnonzero(adm)]
         det = _evaluate(
-            jax.random.fold_in(key, step), pool, {i: i for i in blocks}, costs, eps, mode, ess_min,
+            jax.random.fold_in(key, step), pool, {i: i for i in blocks}, eff, eps, mode, ess_min,
             n_fantasy_start, n_fantasy_max,
         )  # fmt: skip
         gain = np.array([det[i].gain if i in det else 0.0 for i in range(n)])
@@ -703,12 +707,12 @@ def select_batch(
                 gain,
                 np.array([det[i].mc_se if i in det else 0.0 for i in range(n)]),
                 costs,
-                gain / costs,
+                gain / eff,
                 adm,
                 np.array([det[i].n_fantasy if i in det else 0 for i in range(n)]),
                 np.array([det[i].fallback_frac if i in det else 0.0 for i in range(n)]),
             )
-        ratio = np.where(adm & (gain > 0), gain / costs, -np.inf)
+        ratio = np.where(adm & (gain > 0), gain / eff, -np.inf)
         if not np.isfinite(ratio.max(initial=-np.inf)):
             break
         best = int(np.argmax(ratio))

@@ -604,3 +604,20 @@ def test_integrated_mode_is_the_sum_of_squared_ratios_with_no_hinge_and_gives_ga
     )
     assert np.all(np.asarray(hinge.gain) == 0.0)
     assert np.all(np.asarray(integ.gain) > 0.0)
+
+
+def test_a_candidate_that_may_not_finish_before_its_cap_ranks_lower_at_equal_gain(monkeypatch):
+    """The gain is multiplied by P(c <= cap): equal gain and cost, a lower P(finish) must rank lower."""
+    structs, data = world(plist=[make_params(24)])
+    real = acq._gain_samples
+    monkeypatch.setattr(
+        acq, "_gain_samples", lambda *a, **k: (jnp.full_like(real(*a, **k)[0], 2.0), real(*a, **k)[1])
+    )
+    a = cand(0.5, 0.5)._replace(p_finish=0.30)  # listed first, so that a tie-break would pick it
+    b = cand(0.5, 0.5)._replace(p_finish=0.95)
+    chosen, table = acq.select_batch(jax.random.key(0), structs, data, [a, b], XS, 0.01, 1, 1e9, max_draws=8)
+    assert chosen == [1]
+    r = np.asarray(table.ratio)
+    np.testing.assert_allclose(r[0] / r[1], 0.30 / 0.95, rtol=1e-12)
+    np.testing.assert_allclose(r, np.asarray(table.gain) * [0.30, 0.95] / np.asarray(table.cost_mean))
+    assert cand(0.5, 0.5).p_finish == 1.0  # the default leaves a candidate without the field unchanged
