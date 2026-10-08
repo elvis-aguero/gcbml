@@ -60,3 +60,31 @@ W = mean_x (q975 - q025)/median; relative error of the median; posterior median 
     uv run pytest -m slow tests/benchmarks/test_preasymptotic.py -n0
 
 Fits resume from `results/fits_<family>.json`.
+
+## Round 2: error shapes
+
+Round 1 showed a bias of the single power law (model A): fitted order p = 0.75 against a true 1.24. Round 2 compares
+four candidates on new seeds (pre-asymptotic family 200-219, control family 300-319; the baseline never saw them),
+same generator, calibration, noise and MCMC settings as round 1 (600/600, 4 chains, default extensions,
+drop-and-rerun when rhat > 1.05):
+
+- `base`: power law, levels L6-L10 (model A of round 1)
+- `ref`: power law, levels L8-L10 (model O of round 1), the reference
+- `sat`: saturating shape b = h^p / (1 + (h/h_s)^m)^(p/m), m = 4, log h_s ~ U[log(h_min/2), log(8 h_max)], L6-L10
+- `two`: two-term shape b = h^p + w h^q, q = p sigmoid(aux_1), w, aux_1 ~ N(0, 1), L6-L10
+
+Criteria (pre-registered before the run; a candidate X passes if all hold):
+
+- C1: pooled coverage of X on the pre-asymptotic family >= 0.90
+- C2: median over truths of W_X / W_ref <= 1.25 (pre-asymptotic family)
+- C3: median over truths of W_X / W_ref <= 1.00 and pooled coverage >= 0.90 on the control family
+- C5: median over truths of relErr_X / relErr_ref <= 1.50 (pre-asymptotic family). C5 was added AFTER the round-1
+  results were seen (round 1 had base at 2.67 on its seeds).
+
+Run:
+
+    uv run python -m benchmarks.preasymptotic.run fit pre --candidate sat        # seeds 200-219
+    uv run python -m benchmarks.preasymptotic.run fit control --candidate sat    # seeds 300-319
+    uv run python -m benchmarks.preasymptotic.run report2    # round2.{json,md,png}
+
+Per-truth fits are in `results/round2_<candidate>_<family>.json`; the table is `results/round2.md`.
