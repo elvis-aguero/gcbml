@@ -1,0 +1,25 @@
+dataset      n  sampler  wall_s  evals(lik|grad+lik)   ESS: log_p0 log_sig_mu mu[a] mu[b] mu[c]  min-ESS/s  min-ESS/1000ev  rhat_max  div  cov_f0
+a12_0        39  gibbs     12.4     421697      278    531    358    373    618      22.39      0.66     1.028     -  0.78
+a12_0        39  nuts      15.9     225392      445    890    592    363    785      22.85      1.61     1.013     8  0.78
+                 agreement: KS(log p0) 0.028  median|dm|/sigma 0.019  p90 0.043  sigma ratio 1.01
+a12_4        48  gibbs     19.7     424437      658    463    668    362    570      18.36      0.85     1.011     -  0.37
+a12_4        48  nuts      24.6     218548      358    953    912    265    548      10.78      1.21     1.031    18  0.39
+                 agreement: KS(log p0) 0.047  median|dm|/sigma 0.021  p90 0.043  sigma ratio 0.99
+prior_9      39  gibbs     11.3     458802      204    656    263    247    264      18.01      0.44     1.093     -  1.00
+prior_9      39  nuts      31.5     379174     1049    937   1081   1084   1082      29.74      2.47     1.015    73  1.00
+                 agreement: KS(log p0) 0.035  median|dm|/sigma 0.014  p90 0.019  sigma ratio 1.08
+prior_11     48  gibbs     17.5     462935      584    778    563    508    515      29.00      1.10     1.098     -  0.76
+prior_11     48  nuts      64.7     374442      506    311    131    243    312       2.03      0.35     1.468   469  0.49
+                 agreement: KS(log p0) 0.095  median|dm|/sigma 0.072  p90 0.080  sigma ratio 0.84
+prior4_111   48  gibbs     18.9     427773      699    177    792    559    644       9.38      0.41     1.031     -  0.03
+prior4_111   48  nuts      23.7     233907      495    638    727    620    633      20.87      2.12     1.013    10  0.06
+                 agreement: KS(log p0) 0.045  median|dm|/sigma 0.037  p90 0.054  sigma ratio 1.09
+prior4_115   48  gibbs     18.3     443071     1382    257    193    314    477      10.57      0.44     1.086     -  0.50
+prior4_115   48  nuts      59.3     316619      263    278    470    395    571       4.43      0.83     1.038   250  0.54
+                 agreement: KS(log p0) 0.087  median|dm|/sigma 0.060  p90 0.166  sigma ratio 1.04
+prior4_110   48  gibbs     17.0     436855     1398    395   1259   1204    746      23.30      0.91     1.015     -  0.64
+prior4_110   48  nuts      26.9     246271     1320   1380   1220   1257    907      33.67      3.68     1.007     0  0.64
+                 agreement: KS(log p0) 0.030  median|dm|/sigma 0.025  p90 0.043  sigma ratio 0.99
+n200        193  gibbs    264.4     422589      936    182   1011   1111    293       0.69      0.43     1.023     -  nan
+n200        193  nuts    1069.4     204351     1335   1061   1417   2239   1342       0.99      5.19     1.013     0  nan
+                 agreement: KS(log p0) 0.041  median|dm|/sigma 0.021  p90 0.043  sigma ratio 1.01

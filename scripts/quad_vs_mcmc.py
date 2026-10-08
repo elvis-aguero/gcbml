@@ -37,6 +37,8 @@ CFG = ModelConfig()
 SIZES = [12, 6, 3, 3]
 N_REP_SITES, N_REPEATS = 3, 2
 N_SIGMA = 100
+LAST_ST = None  # sampler state (theta, hz, zeta) of the last prior draw
+LAST_T = None  # parameters of the last prior-draw dataset (diagnostics)
 
 
 def design(seed: int, n_levels: int):
@@ -56,13 +58,14 @@ def sigma_n(seed: int) -> np.ndarray:
     return qmc.Sobol(2, scramble=True, seed=seed + 9999).random_base2(7)[:N_SIGMA]
 
 
-def make_dataset(i: int):
-    """(data, z, Xs, f0_true, label, n_levels)."""
+def make_dataset(i: int, kind: str | None = None, n_levels: int | None = None):
+    """(data, z, Xs, f0_true, label, n_levels). kind "a12" or "prior" and n_levels override the id rule."""
     rng = np.random.default_rng(7000 + i)
-    n_levels = 3 if i in (0, 1, 2, 3, 8, 9) else 4
+    n_levels = n_levels or (3 if i in (0, 1, 2, 3, 8, 9) else 4)
+    kind = kind or ("a12" if i < 8 else "prior")
     X, H = design(i, n_levels)
     Xs = sigma_n(i)
-    if i < 8:
+    if kind == "a12":
         t = A12Truth(101 + i, d=2)
         y = np.array([t.value(x[None, :], h) for x, h in zip(X, H[:, 0], strict=True)])
         y = y + 0.01 * rng.standard_normal(len(y))
@@ -79,6 +82,8 @@ def make_dataset(i: int):
         ell_h=np.exp(np.asarray(t["log_ell_h"])), p0=np.exp(np.asarray(t["log_p0"])),
         m_s=float(t["m_s"]), b_s=np.asarray(t["b_s"]),
     )  # fmt: skip
+    global LAST_T, LAST_ST
+    LAST_T, LAST_ST = T, st
     zeta_row = np.asarray(st["zeta"])[np.asarray(smp.aux.row_site)][: len(X)]
     y, mu_true = ti.simulate(rng, T, X, H, Xs, zeta_row=zeta_row)
     data, zp = ti.pad(X, H, y)

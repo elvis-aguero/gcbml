@@ -35,7 +35,7 @@ from gcbml.priors import PriorScales
 from gcbml.synthetic import A12Truth
 
 SCALES = PriorScales(S_mu=1.0, S_c=0.5, S_delta=0.5, S_noise=0.02)
-COST_PRIOR = CostPrior(k0_mean=0.0, k0_sd=1.0, gamma_mean=(3.0,), gamma_sd=(0.5,))
+COST_PRIOR = CostPrior(k0_mean=0.0, k0_sd=1.0, gamma_mean=(3.0,), gamma_sd=(0.5,), s_delta=(0.3,))
 
 
 class A12Campaign(Campaign):

@@ -194,8 +194,13 @@ def _settings_from_dict(d: dict) -> CampaignSettings:
 def _cost_prior_from_dict(d: dict) -> cost.CostPrior:
     d = dict(d)
     d["gamma_mean"], d["gamma_sd"] = tuple(d["gamma_mean"]), tuple(d["gamma_sd"])
-    if isinstance(d["q_sd"], list):
-        d["q_sd"] = tuple(d["q_sd"])
+    if "q_sd" in d or "t_sd" in d:
+        raise ValueError(
+            "state saved with the polynomial cost prior (q_sd, t_sd); it was replaced by the random walk "
+            "(s_delta, spec 2.6): set CostPrior.s_delta and start a new campaign state"
+        )
+    if isinstance(d["s_delta"], list):
+        d["s_delta"] = tuple(d["s_delta"])
     return cost.CostPrior(**d)
 
 
